@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.vscode/
+.pytest_cache/
+*.mat
+*.png
+*.jpg
+*.jpeg
+*.zip
+Data/
