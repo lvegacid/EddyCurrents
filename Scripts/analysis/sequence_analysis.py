@@ -55,4 +55,4 @@ def sequenceAnalysis(mat_file):
             timeFID
         ) * 1e6 * 1e3
 
-    return Be, BeddyFitted, timeFID, nDelays, g_axis, deadTime, acqTime
+    return Be, BeddyFitted, timeFID, nDelays, g_axis, deadTime, acqTime, fidsmap, nReadouts
