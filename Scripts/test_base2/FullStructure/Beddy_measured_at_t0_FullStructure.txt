@@ -1,7 +1,0 @@
-Grad	Phantom_position	B_measured_at_t0_FirstPoint	B_measured_at_t0_Fitted
-X	Center	-2.66	-2.37
-X	+Z		-2.63
-Y	Center	1.09	1.07
-Y	+Z		0.71
-Z	Center	0.18	0.37
-Z	+Z		-7.93
