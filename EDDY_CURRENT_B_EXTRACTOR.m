@@ -1,0 +1,2311 @@
+clear
+clc
+
+%% For Ubuntu, write in Terminal:   /home/Comsol/Comsol/comsol64/multiphysics/bin/comsol mphserver
+addpath('/home/Comsol/Comsol/comsol64/multiphysics/mli')
+rehash;
+which mphstart;
+try
+    mphstart(2036)
+catch ME
+    warning('mphstart(2036) failed or server already connected: %s', ME.message)
+end
+mphversion;
+%%n
+%modelPath = 'D:\Lorena Vega\Next\Eddy currents\GX\Eddy_currents_Next_GX_updated_naming.mph';
+%modelPath = 'D:\Lorena Vega\Next\Eddy currents\GY\Eddy_currents_Next_GY.mph';
+modelPath = 'D:\Lorena Vega\Next\Eddy currents\GZ\Eddy_currents_Next_GZ_Part2.mph';
+
+if ~exist(modelPath,'file')
+    error('Model file not found: %s', modelPath)
+end
+
+import com.comsol.model.*
+import com.comsol.model.util.*
+
+model = mphload(modelPath);
+reset_all_hidden_nodes(model);
+%%
+disp('---- DATASETS DISPONIBLES ----')
+
+d = cell(model.result().dataset().tags);
+
+for i = 1:numel(d)
+
+    dsObj = model.result().dataset(d{i});
+    label = char(dsObj.label);
+
+    sol = 'N/A';
+    solProps = {'solution','sol','data'};
+    for p = 1:numel(solProps)
+        try
+            v = char(dsObj.getString(solProps{p}));
+            if ~isempty(strtrim(v))
+                sol = v;
+                break
+            end
+        catch
+            % property not available for this dataset type
+        end
+    end
+
+    fprintf('[%d] %s  |  %s  |  sol: %s\n', ...
+        i, d{i}, label, sol);
+
+end
+
+J_rms = mphglobal(model, 'J_max');
+disp(J_rms);
+%% Selection of datasets
+selectedIdx = [23]
+%selectedIdx = [1 2 10 11 12 15 16 17 18 21 22 23 25 26 30 31 32 33 39 40 41];     % <-- DATASETS QUE QUIERES ANALIZAR
+%Y: selectedIdx = [1 6 8 9 10 11 12 17 25];     % <-- DATASETS QUE QUIERES ANALIZAR
+
+selectedIdx = unique(selectedIdx(:)');
+selectedIdx = selectedIdx(selectedIdx >= 1 & selectedIdx <= numel(d));
+if isempty(selectedIdx)
+    error('No valid dataset indexes in selectedIdx. Available range: 1..%d', numel(d))
+end
+%% Select path to save data and analyze
+
+baseFolder = 'Z:\Projects\EddyCurrents\Data_acquisition\Simulation results\COMSOL_extracted_data\GZ\AllSimulations';
+
+
+isGradientZExport = contains(upper(modelPath), '\\GZ\\') || contains(upper(baseFolder), '\\GZ');
+
+if ~exist(baseFolder,'dir')
+    mkdir(baseFolder);
+end
+
+csvMetricNames = {
+    'I_rms (A)';
+    'I_max (A)';
+    'B0+X (mT)';
+    'B0-X (mT)';
+    'B0+Y (mT)';
+    'B0-Y (mT)';
+    'B0+Z (mT)';
+    'B0-Z (mT)';
+    'B0Center (mT)';
+    'Beddy+X (uT)';
+    'Beddy-X (uT)';
+    'Beddy+Y (uT)';
+    'Beddy-Y (uT)';
+    'Beddy+Z (uT)';
+    'Beddy-Z (uT)';
+    'BeddyCenter (uT)';
+    'B0_average_FOV (mT)';
+    'Beddy_average_FOV (uT)'
+};
+
+txtFilePath = get_simulation_txt_path(baseFolder);
+
+%% Analyze
+
+datasetTags = cell(model.result.dataset.tags);
+
+hasX = any(strcmp(datasetTags,'clnX')); 
+hasY = any(strcmp(datasetTags,'clnY'));
+hasZ = any(strcmp(datasetTags,'clnZ'));
+ 
+if ~hasX  
+
+    model.result.dataset.create('clnX','CutLine3D');
+    model.result.dataset('clnX').label('LineToExportX');
+    model.result.dataset('clnX').set('method','twopoint');
+
+    model.result.dataset('clnX').set('genpoints',[ -0.1 0 0 ; 0.1 0 0 ]);
+
+end
+
+if ~hasY
+
+    model.result.dataset.create('clnY','CutLine3D');
+    model.result.dataset('clnY').label('LineToExportY');
+    model.result.dataset('clnY').set('method','twopoint');
+
+    model.result.dataset('clnY').set('genpoints',[ 0 0 -0.1 ; 0 0 0.1 ]);
+
+end
+
+if ~hasZ
+
+    model.result.dataset.create('clnZ','CutLine3D');
+    model.result.dataset('clnZ').label('LineToExportZ');
+    model.result.dataset('clnZ').set('method','twopoint');
+
+    model.result.dataset('clnZ').set('genpoints',[ 0 -0.1 0 ; 0 0.1 0 ]);
+
+end
+
+pgTags = cell(model.result.tags);
+
+if ~any(strcmp(pgTags,'pgLine'))
+
+    model.result.create('pgLine','PlotGroup1D');
+    model.result('pgLine').label('LinesToExport');
+
+end
+
+featureTags = cell(model.result('pgLine').feature.tags);
+
+if ~any(strcmp(featureTags,'lngr1'))
+
+    model.result('pgLine').create('lngr1','LineGraph');
+
+    model.result('pgLine').feature('lngr1').label('B0');
+
+    model.result('pgLine').feature('lngr1').set('expr','-mf.By');
+    model.result('pgLine').feature('lngr1').set('unit','mT');
+
+    model.result('pgLine').feature('lngr1').set('xdataexpr','x');
+    model.result('pgLine').feature('lngr1').set('xdatadescr','x-coordinate');
+    model.result('pgLine').feature('lngr1').set('xdataunit','m');
+
+end
+
+model.result('pgLine').feature('lngr1').label('B0');
+model.result('pgLine').feature('lngr1').set('expr','-mf.By');
+model.result('pgLine').feature('lngr1').set('unit','mT');
+
+if ~any(strcmp(featureTags,'lngr2'))
+
+    model.result('pgLine').create('lngr2','LineGraph');
+
+    model.result('pgLine').feature('lngr2').label('Beddy');
+
+    model.result('pgLine').feature('lngr2').set('expr','-(mf.By-withsol(''sol1'',mf.By))');
+    model.result('pgLine').feature('lngr2').set('unit','uT');
+
+    model.result('pgLine').feature('lngr2').set('xdataexpr','x');
+
+end
+
+model.result('pgLine').feature('lngr2').label('Beddy');
+model.result('pgLine').feature('lngr2').set('expr','-(mf.By-withsol(''sol1'',mf.By))');
+model.result('pgLine').feature('lngr2').set('unit','uT');
+
+exportTags = cell(model.result.export.tags);
+
+if ~any(strcmp(exportTags,'expLineBy'))
+    model.result.export.create('expLineBy','pgLine','lngr1','Plot');
+end
+if ~any(strcmp(exportTags,'expLineBeddy'))
+    model.result.export.create('expLineBeddy','pgLine','lngr2','Plot');
+end
+
+if ~any(strcmp(pgTags,'pgFOV'))
+    model.result.create('pgFOV','PlotGroup3D');
+    model.result('pgFOV').label('FOVVolumes');
+end
+
+fovFeatureTags = cell(model.result('pgFOV').feature.tags);
+
+if ~any(strcmp(fovFeatureTags,'volBy'))
+    model.result('pgFOV').create('volBy','Volume');
+end
+model.result('pgFOV').feature('volBy').label('B0');
+model.result('pgFOV').feature('volBy').set('expr','-mf.By');
+model.result('pgFOV').feature('volBy').set('unit','mT');
+
+if ~any(strcmp(fovFeatureTags,'volBeddy'))
+    model.result('pgFOV').create('volBeddy','Volume');
+end
+model.result('pgFOV').feature('volBeddy').label('Beddy');
+model.result('pgFOV').feature('volBeddy').set('expr','-(mf.By-withsol(''sol1'',mf.By))');
+model.result('pgFOV').feature('volBeddy').set('unit','uT');
+
+configure_fov_volume_feature(model, 'pgFOV', 'volBy');
+configure_fov_volume_feature(model, 'pgFOV', 'volBeddy');
+
+exportTags = cell(model.result.export.tags);
+if ~any(strcmp(exportTags,'expByFOV'))
+    model.result.export.create('expByFOV','pgFOV','volBy','Plot');
+end
+if ~any(strcmp(exportTags,'expBeddyFOV'))
+    model.result.export.create('expBeddyFOV','pgFOV','volBeddy','Plot');
+end
+
+% ---------------------------------------------------------
+% ADDITIONAL IMAGE EXPORT SUPPORT (non-breaking extension)
+% ---------------------------------------------------------
+
+% Try to find COMSOL auto-created magnetic plot group containing
+% Multislice and Streamline Multislice.
+magPgTag = '';
+magMultisliceTag = '';
+magStreamlineTag = '';
+
+resultTags = cell(model.result.tags);
+for ir = 1:numel(resultTags)
+    tag = resultTags{ir};
+    try
+        featTags = cell(model.result(tag).feature.tags);
+    catch
+        continue
+    end
+    hasMulti = false;
+    hasStream = false;
+    localMultiTag = '';
+    localStreamTag = '';
+    for jf = 1:numel(featTags)
+        ftag = featTags{jf};
+        flabel = '';
+        try
+            flabel = lower(char(model.result(tag).feature(ftag).label));
+        catch
+            flabel = lower(ftag);
+        end
+        if contains(flabel,'multislice') && ~contains(flabel,'stream')
+            hasMulti = true;
+            localMultiTag = ftag;
+        end
+        if contains(flabel,'streamline') && contains(flabel,'multislice')
+            hasStream = true;
+            localStreamTag = ftag;
+        end
+    end
+    if hasMulti && hasStream
+        magPgTag = tag;
+        magMultisliceTag = localMultiTag;
+        magStreamlineTag = localStreamTag;
+        break
+    end
+end
+
+if isempty(magPgTag)
+    warning('Could not find auto magnetic plot group with Multislice + Streamline Multislice. XY/XZ/YZ image export will be skipped.')
+else
+    fprintf('Using magnetic plot group for image export: %s\n', magPgTag)
+end
+
+% Ensure streamline settings if feature exists
+if ~isempty(magPgTag) && ~isempty(magStreamlineTag)
+    try
+        model.result(magPgTag).feature(magStreamlineTag).set('arrowscale', 50);
+    catch
+        warning('Could not set %s.arrowscale = 50', magStreamlineTag)
+    end
+end
+
+% Create reusable image export object for magnetic XY/XZ/YZ views
+exportTags = cell(model.result.export.tags);
+if ~any(strcmp(exportTags,'expMagViews'))
+    try
+        model.result.export.create('expMagViews','Image3D');
+    catch
+        try
+            model.result.export.create('expMagViews','Image');
+        catch
+            warning('Could not create expMagViews export object.')
+        end
+    end
+end
+
+% Create/ensure a dedicated 3D plot group for View_3D (Beddy volume on FOV)
+pgTags = cell(model.result.tags);
+if any(strcmp(pgTags,'pgView3D'))
+    try
+        model.result.remove('pgView3D');
+    catch
+        try
+            model.result().remove('pgView3D');
+        catch
+        end
+    end
+end
+
+model.result.create('pgView3D','PlotGroup3D');
+model.result('pgView3D').label('View3D_Beddy');
+
+view3DFeatTags = cell(model.result('pgView3D').feature.tags);
+if ~any(strcmp(view3DFeatTags,'vol3d1'))
+    model.result('pgView3D').create('vol3d1','Volume');
+end
+model.result('pgView3D').feature('vol3d1').label('Beddy');
+model.result('pgView3D').feature('vol3d1').set('expr','-(mf.By-withsol(''sol1'',mf.By))');
+model.result('pgView3D').feature('vol3d1').set('unit','uT');
+set_volume_title_from_expr(model, 'pgView3D', 'vol3d1');
+ensure_transformation_exact(model, 'pgView3D', 'vol3d1');
+
+ensure_rotated_view_exists(model);
+enforce_rotated_view_camera(model);
+assign_rotated_view_to_plotgroup(model, 'pgView3D');
+
+exportTags = cell(model.result.export.tags);
+if ~any(strcmp(exportTags,'expView3D'))
+    try
+        model.result.export.create('expView3D','Image3D');
+    catch
+        try
+            model.result.export.create('expView3D','Image');
+        catch
+            warning('Could not create expView3D export object.')
+        end
+    end
+end
+
+% Create reusable CutPlane dataset + 2D plot group for XY/XZ/YZ exports
+datasetTags = cell(model.result.dataset.tags);
+if ~any(strcmp(datasetTags,'cpl1'))
+    model.result.dataset.create('cpl1','CutPlane');
+end
+
+pgTags = cell(model.result.tags);
+if ~any(strcmp(pgTags,'pg_cut'))
+    model.result.create('pg_cut','PlotGroup2D');
+    model.result('pg_cut').label('CutPlane_Bfield');
+end
+
+pgCutFeatTags = cell(model.result('pg_cut').feature.tags);
+if any(strcmp(pgCutFeatTags,'surf1'))
+    try
+        model.result('pg_cut').feature.remove('surf1');
+    catch
+        try
+            model.result('pg_cut').remove('surf1');
+        catch
+        end
+    end
+end
+if ~any(strcmp(pgCutFeatTags,'str1'))
+    model.result('pg_cut').create('str1','Streamline');
+end
+
+try
+    model.result('pg_cut').feature('str1').feature.remove('trn1');
+catch
+    try
+        model.result('pg_cut').feature('str1').remove('trn1');
+    catch
+    end
+end
+
+model.result('pg_cut').set('data','cpl1');
+model.result('pg_cut').feature('str1').label('Magnetic Flux Density Streamline');
+try
+    model.result('pg_cut').feature('str1').set('planecoordsys','cartesian');
+catch
+end
+try
+    model.result('pg_cut').feature('str1').set('expr',{'mf.Bx','mf.By','mf.Bz'});
+catch
+end
+try
+    model.result('pg_cut').feature('str1').set('posmethod','magnitude');
+catch
+end
+try
+    model.result('pg_cut').feature('str1').set('magdensity', [10 20]);    
+catch
+end
+try
+    model.result('pg_cut').feature('str1').set('pointtype','arrow');
+catch
+end
+try
+    model.result('pg_cut').feature('str1').set('arrowscaleactive', false);
+catch
+    try
+        model.result('pg_cut').feature('str1').set('arrowscaleactive', 'off');
+    catch
+    end
+end
+try
+    model.result('pg_cut').feature('str1').set('arrowlength','normalized');
+catch
+end
+try
+    model.result('pg_cut').feature('str1').set('linetype','line');
+catch
+end
+try
+    model.result('pg_cut').feature('str1').set('color','gray');
+catch
+end
+
+exportTags = cell(model.result.export.tags);
+if ~any(strcmp(exportTags,'expCutViews'))
+    try
+        model.result.export.create('expCutViews','Image2D');
+    catch
+        try
+            model.result.export.create('expCutViews','Image');
+        catch
+            warning('Could not create expCutViews export object.')
+        end
+    end
+end
+
+requestedSelectionNames = {'Selection','FOV'};
+requestedFOVName = requestedSelectionNames{1};
+fovSelectionTag = detect_comp1_selection_tag(model, requestedSelectionNames);
+
+if isempty(fovSelectionTag)
+    fprintf('[DBG] No preferred selection tag found. Preferred names: %s | %s\n', requestedSelectionNames{1}, requestedSelectionNames{2});
+    comp1SelTags = {};
+    try
+        comp1SelTags = cell(model.component('comp1').selection.tags);
+    catch
+        comp1SelTags = {};
+    end
+    if ~isempty(comp1SelTags)
+        fprintf('[DBG] Available comp1 selections: %s\n', strjoin(comp1SelTags, ', '));
+    end
+else
+    for rn = 1:numel(requestedSelectionNames)
+        if strcmpi(fovSelectionTag, requestedSelectionNames{rn})
+            requestedFOVName = requestedSelectionNames{rn};
+            break
+        end
+        try
+            if strcmpi(char(model.component('comp1').selection(fovSelectionTag).label), requestedSelectionNames{rn})
+                requestedFOVName = requestedSelectionNames{rn};
+                break
+            end
+        catch
+        end
+    end
+    fprintf('[DBG] Selected comp1 selection: requested=%s, tag=%s\n', requestedFOVName, fovSelectionTag);
+end
+
+NdatasetsSelected = numel(selectedIdx);
+
+
+for k = 1:NdatasetsSelected
+
+    try
+        datasetTag = d{selectedIdx(k)};
+        label = char(model.result.dataset(datasetTag).label);
+
+        fprintf('\nProcesando dataset: %s\n',label);
+
+        folderLabel = label;
+        splitParts = regexp(folderLabel,'[/\\]','split');
+        if ~isempty(splitParts)
+            folderLabel = strtrim(splitParts{1});
+        end
+
+        safeLabel = regexprep(folderLabel,'[^a-zA-Z0-9 _.-]','_');
+        safeLabel = strtrim(regexprep(safeLabel,'\s+',' '));
+        safeLabel = regexprep(safeLabel,'[\s\.]+$','');
+        if isempty(safeLabel)
+            safeLabel = 'Dataset';
+        end
+
+        folderName = fullfile(baseFolder,safeLabel);
+        if ~exist(folderName,'dir')
+            [okCreate,msgCreate] = mkdir(folderName);
+            if ~okCreate
+                warning('Could not create label-based folder: %s. Reason: %s', folderName, msgCreate)
+            end
+        end
+
+        exportFolder = folderName;
+        testFile = fullfile(exportFolder,'__write_test__.tmp');
+        [fidTest,msgTest] = fopen(testFile,'w');
+        if fidTest ~= -1
+            fclose(fidTest);
+            delete(testFile);
+        else
+            safeTagFolder = regexprep(char(datasetTag),'[^a-zA-Z0-9 _.-]','_');
+            safeTagFolder = strtrim(regexprep(safeTagFolder,'\s+',' '));
+            safeTagFolder = regexprep(safeTagFolder,'[\s\.]+$','');
+            if isempty(safeTagFolder)
+                safeTagFolder = sprintf('Dataset_%d', selectedIdx(k));
+            end
+
+            exportFolder = fullfile(baseFolder,safeTagFolder);
+            if ~exist(exportFolder,'dir')
+                [okCreate,msgCreate] = mkdir(exportFolder);
+                if ~okCreate
+                    error('Could not create output folder: %s. Reason: %s', exportFolder, msgCreate)
+                end
+            end
+
+            testFile = fullfile(exportFolder,'__write_test__.tmp');
+            [fidTest2,msgTest2] = fopen(testFile,'w');
+            if fidTest2 ~= -1
+                fclose(fidTest2);
+                delete(testFile);
+            else
+                error('Output folders are not writable. Tried: %s and %s. Reasons: %s | %s', folderName, exportFolder, msgTest, msgTest2)
+            end
+
+            warning('Using dataset-tag folder for %s: %s', datasetTag, exportFolder)
+        end
+
+        model.result('pgFOV').set('data',datasetTag);
+        model.result('pgView3D').set('data',datasetTag);
+
+        fovAssigned = false;
+        try
+            model.result('pgFOV').selection.named(fovSelectionTag);
+            fovAssigned = true;
+        catch
+            % try comp-qualified variants below
+        end
+
+        if ~fovAssigned && ~isempty(fovSelectionTag)
+            try
+                model.result('pgFOV').selection.named(['comp1_' fovSelectionTag]);
+                fovAssigned = true;
+            catch
+                % keep false and try label-based variants below
+            end
+        end
+
+        if ~fovAssigned
+            for rn = 1:numel(requestedSelectionNames)
+                requestedName = requestedSelectionNames{rn};
+                try
+                    model.result('pgFOV').selection.named(requestedName);
+                    fovAssigned = true;
+                    requestedFOVName = requestedName;
+                    break
+                catch
+                end
+                try
+                    model.result('pgFOV').selection.named(['comp1_' requestedName]);
+                    fovAssigned = true;
+                    requestedFOVName = requestedName;
+                    break
+                catch
+                end
+            end
+        end
+
+        if ~fovAssigned
+            error('Could not assign named selection "%s" to pgFOV for dataset %s.', requestedFOVName, datasetTag)
+        end
+        fprintf('   [DBG] pgFOV selection assigned=%d using requestedName=%s, detectedTag=%s\n', fovAssigned, requestedFOVName, fovSelectionTag);
+
+        % Apply same FOV named selection to dedicated 3D view plot group.
+        view3DAssigned = false;
+        try
+            model.result('pgView3D').selection.named(fovSelectionTag);
+            view3DAssigned = true;
+        catch
+        end
+        if ~view3DAssigned && ~isempty(fovSelectionTag)
+            try
+                model.result('pgView3D').selection.named(['comp1_' fovSelectionTag]);
+                view3DAssigned = true;
+            catch
+            end
+        end
+        if ~view3DAssigned
+            for rn = 1:numel(requestedSelectionNames)
+                requestedName = requestedSelectionNames{rn};
+                try
+                    model.result('pgView3D').selection.named(requestedName);
+                    view3DAssigned = true;
+                    requestedFOVName = requestedName;
+                    break
+                catch
+                end
+                try
+                    model.result('pgView3D').selection.named(['comp1_' requestedName]);
+                    view3DAssigned = true;
+                    requestedFOVName = requestedName;
+                    break
+                catch
+                end
+            end
+        end
+        fprintf('   [DBG] pgView3D selection assigned=%d using requestedName=%s, detectedTag=%s\n', view3DAssigned, requestedFOVName, fovSelectionTag);
+
+        try
+            if ~exist(exportFolder,'dir')
+                [okCreate,msgCreate] = mkdir(exportFolder);
+                if ~okCreate
+                    error('Could not create output folder before FOV export: %s. Reason: %s', exportFolder, msgCreate)
+                end
+            end
+
+            ensure_rotated_view_exists(model);
+            enforce_rotated_view_camera(model);
+            assign_rotated_view_to_plotgroup(model, 'pgFOV');
+
+            configure_fov_volume_feature(model, 'pgFOV', 'volBy');
+            configure_fov_volume_feature(model, 'pgFOV', 'volBeddy');
+            prepare_plot_for_export(model, 'pgFOV', true);
+
+            safeDatasetTag = regexprep(char(datasetTag),'[^a-zA-Z0-9_-]','_');
+
+            fovByFile = fullfile(exportFolder,'B0_FOV.txt');
+            if exist(fovByFile,'file')
+                delete(fovByFile);
+            end
+            model.result.export('expByFOV').set('plot','volBy');
+            model.result.export('expByFOV').set('filename',fovByFile);
+            try
+                prepare_plot_for_export(model, 'pgFOV', true);
+                model.result.export('expByFOV').run;
+            catch
+                fovByFile = fullfile(exportFolder,['B0_FOV_' safeDatasetTag '.txt']);
+                if exist(fovByFile,'file')
+                    delete(fovByFile);
+                end
+                model.result.export('expByFOV').set('filename',fovByFile);
+                prepare_plot_for_export(model, 'pgFOV', true);
+                model.result.export('expByFOV').run;
+            end
+            if isGradientZExport && exist(fovByFile,'file')
+                negate_last_column_in_text_file(fovByFile);
+            end
+
+            fovBeddyFile = fullfile(exportFolder,'Beddy_FOV.txt');
+            if exist(fovBeddyFile,'file')
+                delete(fovBeddyFile);
+            end
+            model.result.export('expBeddyFOV').set('plot','volBeddy');
+            model.result.export('expBeddyFOV').set('filename',fovBeddyFile);
+            try
+                prepare_plot_for_export(model, 'pgFOV', true);
+                model.result.export('expBeddyFOV').run;
+            catch
+                fovBeddyFile = fullfile(exportFolder,['Beddy_FOV_' safeDatasetTag '.txt']);
+                if exist(fovBeddyFile,'file')
+                    delete(fovBeddyFile);
+                end
+                model.result.export('expBeddyFOV').set('filename',fovBeddyFile);
+                prepare_plot_for_export(model, 'pgFOV', true);
+                model.result.export('expBeddyFOV').run;
+            end
+            if isGradientZExport && exist(fovBeddyFile,'file')
+                negate_last_column_in_text_file(fovBeddyFile);
+            end
+
+            fprintf('   Exported FOV\n');
+        catch MEfov
+            warning('FOV export failed for dataset %s: %s', datasetTag, MEfov.message)
+        end
+
+        % Legacy B_universe XY/XZ/YZ export disabled.
+        % These files are now generated only once via the CutPlane block below.
+
+        try
+            if view3DAssigned
+                ensure_rotated_view_exists(model);
+                enforce_rotated_view_camera(model);
+                assign_rotated_view_to_plotgroup(model, 'pgView3D');
+
+                try
+                    hiddenDomainCount = hide_domains_by_label_for_plotgroup(model, 'pgView3D', {'Universe','Auxiliary_domain'});
+                    fprintf('   [DBG] Temporary domain hide count for pgView3D: %d\n', hiddenDomainCount);
+                catch MEhide3D
+                    warning('Could not apply temporary domain hide for View_3D (%s).', MEhide3D.message)
+                end
+
+                model.result('pgView3D').run;
+                try
+                    model.result('pgView3D').run;
+                catch
+                end
+                enforce_rotated_view_camera(model);
+                try
+                    model.result('pgView3D').run;
+                catch
+                end
+                try
+                    model.result('pgView3D').feature('vol3d1').label('Beddy');
+                catch
+                end
+                try
+                    model.result('pgView3D').feature('vol3d1').set('expr','-(mf.By-withsol(''sol1'',mf.By))');
+                catch
+                end
+                try
+                    model.result('pgView3D').feature('vol3d1').set('unit','uT');
+                catch
+                end
+                set_volume_title_from_expr(model, 'pgView3D', 'vol3d1');
+                try
+                    model.result('pgView3D').run;
+                catch
+                end
+                outPath3D = fullfile(exportFolder, 'Beddy_3DView.png');
+                configure_image_export(model, 'expView3D', 'pgView3D', outPath3D);
+                model.result.export('expView3D').run;
+                fprintf('   Exported Beddy_3DView.png\n');
+
+                try
+                    model.result('pgView3D').feature('vol3d1').label('B0');
+                catch
+                end
+                try
+                    model.result('pgView3D').feature('vol3d1').set('expr','-mf.By');
+                catch
+                end
+                try
+                    model.result('pgView3D').feature('vol3d1').set('unit','mT');
+                catch
+                end
+                set_volume_title_from_expr(model, 'pgView3D', 'vol3d1');
+                try
+                    model.result('pgView3D').run;
+                catch
+                end
+                outPath3D = fullfile(exportFolder, 'B0_3DView.png');
+                configure_image_export(model, 'expView3D', 'pgView3D', outPath3D);
+                model.result.export('expView3D').run;
+                fprintf('   Exported B0_3DView.png\n');
+
+                % Restore a clean visibility state for subsequent exports.
+                try
+                    reset_all_hidden_nodes(model);
+                catch MEreset3D
+                    warning('Post-3D reset_all_hidden_nodes failed for dataset %s: %s', datasetTag, MEreset3D.message)
+                end
+            else
+                warning('Skipping View_3D export for dataset %s: FOV selection not assigned.', datasetTag)
+            end
+        catch ME3D
+            warning('Failed exporting View_3D for dataset %s: %s', datasetTag, ME3D.message)
+        end
+
+        % -------------------------------------------------
+        % CUTPLANE IMAGE EXPORTS (XY / XZ / YZ)
+        % -------------------------------------------------
+        try
+            model.result.dataset('cpl1').set('data', datasetTag);
+
+            cutViewSpecs = {
+                'XY', 'xy', 'B_universe_XZ.png';
+                'XZ', 'xz', 'B_universe_XY.png';
+                'YZ', 'yz', 'B_universe_YZ.png'
+            };
+
+            for icp = 1:size(cutViewSpecs, 1)
+                planeLabel = cutViewSpecs{icp, 1};
+                planeName = cutViewSpecs{icp, 2};
+                outName = cutViewSpecs{icp, 3};
+
+                try
+                    model.result.dataset('cpl1').set('quickplane', planeName);
+                catch MEplane
+                    warning('Failed setting CutPlane %s for dataset %s: %s', planeLabel, datasetTag, MEplane.message)
+                    continue
+                end
+
+                try
+                    model.result('pg_cut').set('data', 'cpl1');
+                catch
+                end
+                try
+                    model.result('pg_cut').set('view', 'auto');
+                catch
+                end
+                try
+                    model.result('pg_cut').selection.all;
+                catch
+                end
+
+                try
+                    model.result('pg_cut').feature('str1').selection.all;
+                catch
+                end
+                try
+                    model.result('pg_cut').feature('str1').feature.remove('trn1');
+                catch
+                    try
+                        model.result('pg_cut').feature('str1').remove('trn1');
+                    catch
+                    end
+                end
+                try
+                    set_cutplane_axis_labels(model, 'pg_cut', planeLabel);
+                catch
+                end
+                try
+                    model.result('pg_cut').set('xlabelactive', false);
+                catch
+                end
+                try
+                    model.result('pg_cut').set('ylabelactive', false);
+                catch
+                end
+                try
+                    model.result('pg_cut').set('showlegendstitle', false);
+                catch
+                end
+
+                outPathCut = fullfile(exportFolder, outName);
+                try
+                    prepare_plot_for_export(model, 'pg_cut', false);
+                    configure_image_export(model, 'expCutViews', 'pg_cut', outPathCut);
+                    model.result.export('expCutViews').run;
+                    fprintf('   Exported %s via CutPlane\n', outName);
+                catch MEcut
+                    warning('Failed CutPlane export %s for dataset %s: %s', outName, datasetTag, MEcut.message)
+                end
+            end
+        catch MEcutBlock
+            warning('CutPlane image export block failed for dataset %s: %s', datasetTag, MEcutBlock.message)
+        end
+
+        model.result.dataset('clnX').set('data',datasetTag);
+        model.result.dataset('clnY').set('data',datasetTag);
+        model.result.dataset('clnZ').set('data',datasetTag);
+
+        % Enforce canonical line definitions every run to avoid stale axis configs
+        model.result.dataset('clnX').set('method','twopoint');
+        model.result.dataset('clnX').set('genpoints',[ -0.1 0 0 ; 0.1 0 0 ]);
+
+        model.result.dataset('clnY').set('method','twopoint');
+        model.result.dataset('clnY').set('genpoints',[ 0 0 -0.1 ; 0 0 0.1 ]);
+
+        model.result.dataset('clnZ').set('method','twopoint');
+        model.result.dataset('clnZ').set('genpoints',[ 0 -0.1 0 ; 0 0.1 0 ]);
+
+    lineList = {'clnX','clnY','clnZ'};
+    axisName = {'X','Y','Z'};
+
+    coord = {'-x','z','y'};
+
+
+        for a = 1:3
+
+            try
+                if ~exist(exportFolder,'dir')
+                    [okCreate,msgCreate] = mkdir(exportFolder);
+                    if ~okCreate
+                        error('Could not create output folder before line export: %s. Reason: %s', exportFolder, msgCreate)
+                    end
+                end
+
+                lineTag = lineList{a};
+                axisLabel = axisName{a};
+                coordExpr = coord{a};
+
+
+            model.result('pgLine').set('data',lineTag);
+
+
+            model.result('pgLine').feature('lngr1').set('xdataexpr',coordExpr);
+            model.result('pgLine').feature('lngr2').set('xdataexpr',coordExpr);
+
+
+            model.result('pgLine').run;
+            try
+                model.result('pgLine').run;
+            catch
+            end
+
+                fileName = fullfile(exportFolder,...
+                    ['Beddy_Line_' axisLabel '.txt']);
+
+            if exist(fileName,'file')
+                delete(fileName);
+            end
+            model.result.export('expLineBeddy').set('filename',fileName);
+            prepare_plot_for_export(model, 'pgLine', false);
+            model.result.export('expLineBeddy').run;
+            if isGradientZExport && exist(fileName,'file')
+                negate_last_column_in_text_file(fileName);
+            end
+
+                fileName = fullfile(exportFolder,...
+                    ['B0_Line_' axisLabel '.txt']);
+
+            if exist(fileName,'file')
+                delete(fileName);
+            end
+            model.result.export('expLineBy').set('filename',fileName);
+            prepare_plot_for_export(model, 'pgLine', false);
+            model.result.export('expLineBy').run;
+            if isGradientZExport && exist(fileName,'file')
+                negate_last_column_in_text_file(fileName);
+            end
+
+
+                fprintf('   Exported axis %s\n',axisLabel);
+            catch MEaxis
+                warning('Failed axis %s for dataset %s: %s', axisName{a}, datasetTag, MEaxis.message)
+            end
+
+        end
+
+        % -------------------------------------------------
+        % ADD-ON: AGGREGATED CSV METRICS PER DATASET
+        % -------------------------------------------------
+        try
+            csvValues = nan(numel(csvMetricNames), 1);
+
+            jRmsVal = mphglobal(model, 'J_max');
+            jRmsVal = to_scalar_or_nan(jRmsVal);
+            csvValues(1) = jRmsVal;
+            csvValues(2) = jRmsVal * sqrt(2);
+
+            pointNames = {'+X','-X','+Y','-Y','+Z','-Z','Center'};
+            pointCoords = [
+                -0.05,  0.00,  0.00;  % +X
+                 0.05,  0.00,  0.00;  % -X
+                 0.00,  0.00,  0.05;  % +Y
+                 0.00,  0.00, -0.05;  % -Y
+                 0.00,  0.05,  0.00;  % +Z
+                 0.00, -0.05,  0.00;  % -Z
+                 0.00,  0.00,  0.00   % Center
+            ];
+
+            for ipt = 1:size(pointCoords,1)
+                cpTag = sprintf('cptAgg_%d_%d', k, ipt);
+                evB0Tag = sprintf('evB0Agg_%d_%d', k, ipt);
+                evBeddyTag = sprintf('evBeddyAgg_%d_%d', k, ipt);
+
+                safe_remove_result_dataset(model, cpTag);
+                safe_remove_result_numerical(model, evB0Tag);
+                safe_remove_result_numerical(model, evBeddyTag);
+
+                model.result.dataset.create(cpTag, 'CutPoint3D');
+                model.result.dataset(cpTag).set('data', datasetTag);
+                model.result.dataset(cpTag).set('pointx', pointCoords(ipt, 1));
+                model.result.dataset(cpTag).set('pointy', pointCoords(ipt, 2));
+                model.result.dataset(cpTag).set('pointz', pointCoords(ipt, 3));
+
+                model.result.numerical.create(evB0Tag, 'EvalPoint');
+                model.result.numerical(evB0Tag).set('data', cpTag);
+                model.result.numerical(evB0Tag).set('expr', '-mf.By');
+                model.result.numerical(evB0Tag).set('unit', 'mT');
+                try
+                    model.result.numerical(evB0Tag).run;
+                catch
+                end
+                b0Val = safe_get_numerical_scalar(model, evB0Tag);
+
+                model.result.numerical.create(evBeddyTag, 'EvalPoint');
+                model.result.numerical(evBeddyTag).set('data', cpTag);
+                model.result.numerical(evBeddyTag).set('expr', '-(mf.By-withsol(''sol1'',mf.By))');
+                model.result.numerical(evBeddyTag).set('unit', 'uT');
+                try
+                    model.result.numerical(evBeddyTag).run;
+                catch
+                end
+                beddyVal = safe_get_numerical_scalar(model, evBeddyTag);
+
+                switch pointNames{ipt}
+                    case '+X'
+                        csvValues(3) = b0Val;
+                        csvValues(10) = beddyVal;
+                    case '-X'
+                        csvValues(4) = b0Val;
+                        csvValues(11) = beddyVal;
+                    case '+Y'
+                        csvValues(5) = b0Val;
+                        csvValues(12) = beddyVal;
+                    case '-Y'
+                        csvValues(6) = b0Val;
+                        csvValues(13) = beddyVal;
+                    case '+Z'
+                        csvValues(7) = b0Val;
+                        csvValues(14) = beddyVal;
+                    case '-Z'
+                        csvValues(8) = b0Val;
+                        csvValues(15) = beddyVal;
+                    case 'Center'
+                        csvValues(9) = b0Val;
+                        csvValues(16) = beddyVal;
+                end
+            end
+
+            avB0Tag = sprintf('avB0Agg_%d', k);
+            avBeddyTag = sprintf('avBeddyAgg_%d', k);
+            safe_remove_result_numerical(model, avB0Tag);
+            safe_remove_result_numerical(model, avBeddyTag);
+
+            model.result.numerical.create(avB0Tag, 'AvVolume');
+            model.result.numerical(avB0Tag).set('data', datasetTag);
+            model.result.numerical(avB0Tag).set('expr', 'abs(mf.By)');
+            model.result.numerical(avB0Tag).set('unit', 'mT');
+            apply_named_selection_to_numerical(model, avB0Tag, fovSelectionTag, requestedFOVName, requestedSelectionNames);
+            try
+                model.result.numerical(avB0Tag).run;
+            catch
+            end
+            csvValues(17) = safe_get_numerical_scalar(model, avB0Tag);
+
+            model.result.numerical.create(avBeddyTag, 'AvVolume');
+            model.result.numerical(avBeddyTag).set('data', datasetTag);
+            model.result.numerical(avBeddyTag).set('expr', 'abs(mf.By-withsol(''sol1'',mf.By))');
+            model.result.numerical(avBeddyTag).set('unit', 'uT');
+            apply_named_selection_to_numerical(model, avBeddyTag, fovSelectionTag, requestedFOVName, requestedSelectionNames);
+            try
+                model.result.numerical(avBeddyTag).run;
+            catch
+            end
+            csvValues(18) = safe_get_numerical_scalar(model, avBeddyTag);
+
+            didWriteTxt = upsert_simulation_txt_column(txtFilePath, folderLabel, csvMetricNames, csvValues);
+            if didWriteTxt
+                fprintf('   Updated aggregated TXT: %s\n', txtFilePath);
+            else
+                fprintf('   Skipped aggregated TXT update for dataset "%s"\n', folderLabel);
+            end
+        catch MEcsv
+            warning('CSV aggregation failed for dataset %s: %s', datasetTag, MEcsv.message)
+        end
+
+    catch MEdataset
+        warning('Failed dataset index %d: %s', selectedIdx(k), MEdataset.message)
+    end
+
+end
+
+
+out = model;
+
+
+disp('POSTPROCESS FINISHED');
+
+
+function swap_y_z_columns_in_text_file(filePath)
+    txt = fileread(filePath);
+    lines = regexp(txt,'\r\n|\n|\r','split');
+
+    for iLine = 1:numel(lines)
+        current = lines{iLine};
+        trimmed = strtrim(current);
+
+        if isempty(trimmed)
+            continue;
+        end
+
+        if startsWith(trimmed,'%') || startsWith(trimmed,'#')
+            continue;
+        end
+
+        nums = sscanf(current,'%f');
+        if numel(nums) < 3
+            continue;
+        end
+
+        nums([2 3]) = nums([3 2]);
+
+        rebuilt = sprintf('%.15g\t', nums);
+        rebuilt = rebuilt(1:end-1);
+        lines{iLine} = rebuilt;
+    end
+
+    outTxt = strjoin(lines, newline);
+    fid = fopen(filePath,'w');
+    if fid == -1
+        error('Could not open file for Y/Z post-process: %s', filePath)
+    end
+    fwrite(fid, outTxt);
+    fclose(fid);
+end
+
+
+function negate_x_column_in_text_file(filePath)
+    txt = fileread(filePath);
+    lines = regexp(txt,'\r\n|\n|\r','split');
+
+    for iLine = 1:numel(lines)
+        current = lines{iLine};
+        trimmed = strtrim(current);
+
+        if isempty(trimmed)
+            continue;
+        end
+
+        if startsWith(trimmed,'%') || startsWith(trimmed,'#')
+            continue;
+        end
+
+        nums = sscanf(current,'%f');
+        if numel(nums) < 1
+            continue;
+        end
+
+        nums(1) = -nums(1);
+
+        rebuilt = sprintf('%.15g\t', nums);
+        rebuilt = rebuilt(1:end-1);
+        lines{iLine} = rebuilt;
+    end
+
+    outTxt = strjoin(lines, newline);
+    fid = fopen(filePath,'w');
+    if fid == -1
+        error('Could not open file for X-sign post-process: %s', filePath)
+    end
+    fwrite(fid, outTxt);
+    fclose(fid);
+end
+
+
+function negate_last_column_in_text_file(filePath)
+    txt = fileread(filePath);
+    lines = regexp(txt,'\r\n|\n|\r','split');
+
+    for iLine = 1:numel(lines)
+        current = lines{iLine};
+        trimmed = strtrim(current);
+
+        if isempty(trimmed)
+            continue;
+        end
+
+        if startsWith(trimmed,'%') || startsWith(trimmed,'#')
+            continue;
+        end
+
+        nums = sscanf(current,'%f');
+        if numel(nums) < 1
+            continue;
+        end
+
+        nums(end) = -nums(end);
+
+        rebuilt = sprintf('%.15g\t', nums);
+        rebuilt = rebuilt(1:end-1);
+        lines{iLine} = rebuilt;
+    end
+
+    outTxt = strjoin(lines, newline);
+    fid = fopen(filePath,'w');
+    if fid == -1
+        error('Could not open file for last-column sign post-process: %s', filePath)
+    end
+    fwrite(fid, outTxt);
+    fclose(fid);
+end
+
+
+function ensure_rotated_view_exists(model)
+    hasView5 = false;
+
+    try
+        compViews = cell(model.component('comp1').view.tags);
+        hasView5 = any(strcmp(compViews, 'view5'));
+    catch
+        hasView5 = false;
+    end
+
+    if ~hasView5
+        try
+            model.component('comp1').view.duplicate('view5','view1');
+            hasView5 = true;
+        catch
+            try
+                model.component('comp1').view.create('view5','View3D');
+                hasView5 = true;
+            catch
+            end
+        end
+    end
+
+    if ~hasView5
+        try
+            globalViews = cell(model.view.tags);
+            hasView5 = any(strcmp(globalViews, 'view5'));
+        catch
+            hasView5 = false;
+        end
+    end
+
+    if ~hasView5
+        try
+            model.view.duplicate('view5','view1');
+            hasView5 = true;
+        catch
+            try
+                model.view.create('view5','View3D');
+                hasView5 = true;
+            catch
+            end
+        end
+    end
+
+    try
+        model.component('comp1').view('view5').label('View Rot');
+    catch
+    end
+
+    try
+        model.view('view5').label('View Rot');
+    catch
+    end
+end
+
+
+function enforce_rotated_view_camera(model)
+    ensure_rotated_view_exists(model);
+    camPos = [1 1 1];
+    camUp = [0 1 0];
+
+    set_existing_view_vectors(model, 'view5', camPos, camUp);
+    set_plane_camera(model, 'view5', camPos, camUp);
+
+    resolvedViewTag = resolve_existing_view_tag(model, 'view5');
+    set_existing_view_vectors(model, resolvedViewTag, camPos, camUp);
+    set_plane_camera(model, resolvedViewTag, camPos, camUp);
+
+    try
+        model.component('comp1').view('view5').camera.setIndex('position', 1, 0);
+    catch
+    end
+    try
+        model.component('comp1').view('view5').camera.setIndex('position', 1, 1);
+    catch
+    end
+    try
+        model.component('comp1').view('view5').camera.set('position',[1 1 1]);
+    catch
+    end
+    try
+        model.component('comp1').view('view5').camera.setIndex('target', 0, 0);
+    catch
+    end
+    try
+        model.component('comp1').view('view5').camera.setIndex('target', 0, 1);
+    catch
+    end
+    try
+        model.component('comp1').view('view5').camera.set('target',[0 0 0]);
+    catch
+    end
+    try
+        model.component('comp1').view('view5').camera.setIndex('up', 0, 0);
+    catch
+    end
+    try
+        model.component('comp1').view('view5').camera.setIndex('up', 1, 1);
+    catch
+    end
+    try
+        model.component('comp1').view('view5').camera.set('up',[0 1 0]);
+    catch
+    end
+end
+
+
+function assign_rotated_view_to_plotgroup(model, plotGroupTag)
+    ensure_rotated_view_exists(model);
+    resolvedViewTag = resolve_existing_view_tag(model, 'view5');
+    try
+        model.result(plotGroupTag).set('view', resolvedViewTag);
+    catch
+        try
+            model.result(plotGroupTag).set('view', 'view5');
+        catch
+        end
+    end
+
+    try
+        activeViewTag = char(model.result(plotGroupTag).getString('view'));
+    catch
+        activeViewTag = '<unknown>';
+    end
+    fprintf('   [DBG] plotGroup=%s resolvedView=%s activeView=%s\n', plotGroupTag, resolvedViewTag, activeViewTag);
+end
+
+
+function set_volume_title_from_expr(model, pgTag, volumeTag)
+    try
+        expr = strtrim(char(model.result(pgTag).feature(volumeTag).getString('expr')));
+    catch
+        expr = '';
+    end
+
+    try
+        model.result(pgTag).feature(volumeTag).set('titletype','manual');
+    catch
+    end
+
+    if strcmp(expr, '-(mf.By-withsol(''sol1'',mf.By))')
+        try
+            model.result(pgTag).feature(volumeTag).set('title','Beddy (uT)');
+        catch
+        end
+    elseif strcmp(expr, '-mf.By')
+        try
+            model.result(pgTag).feature(volumeTag).set('title','B0 (mT)');
+        catch
+        end
+    end
+end
+
+
+function configure_fov_volume_feature(model, pgTag, volumeTag)
+    try
+        expr = strtrim(char(model.result(pgTag).feature(volumeTag).getString('expr')));
+    catch
+        expr = '';
+    end
+
+    try
+        model.result(pgTag).feature(volumeTag).set('titletype','manual');
+    catch
+    end
+
+    if strcmp(expr, '-(mf.By-withsol(''sol1'',mf.By))')
+        try
+            model.result(pgTag).feature(volumeTag).set('title','Beddy (uT)');
+        catch
+        end
+    elseif strcmp(expr, '-mf.By')
+        try
+            model.result(pgTag).feature(volumeTag).set('title','B0y (mT)');
+        catch
+        end
+    end
+
+    ensure_transformation_exact(model, pgTag, volumeTag);
+end
+
+
+function ensure_transformation_exact(model, pgTag, volumeTag)
+    trnExists = false;
+    try
+        subTags = cell(model.result(pgTag).feature(volumeTag).feature.tags);
+        trnExists = any(strcmp(subTags,'trn1'));
+    catch
+        trnExists = false;
+    end
+
+    if ~trnExists
+        try
+            model.result(pgTag).feature(volumeTag).create('trn1','Transformation');
+        catch
+        end
+    end
+
+    try
+        model.result(pgTag).feature(volumeTag).feature('trn1').set('transtype','general');
+    catch
+    end
+
+    try
+        model.result(pgTag).feature(volumeTag).feature('trn1').setIndex('transmatrix', -1, 0, 0);
+        model.result(pgTag).feature(volumeTag).feature('trn1').setIndex('transmatrix', 0, 1, 1);
+        model.result(pgTag).feature(volumeTag).feature('trn1').setIndex('transmatrix', 1, 1, 2);
+        model.result(pgTag).feature(volumeTag).feature('trn1').setIndex('transmatrix', 1, 2, 1);
+        model.result(pgTag).feature(volumeTag).feature('trn1').setIndex('transmatrix', 0, 2, 2);
+    catch
+        try
+            model.result(pgTag).feature(volumeTag).feature('trn1').setIndex('transmatrix', -1, 1, 1);
+            model.result(pgTag).feature(volumeTag).feature('trn1').setIndex('transmatrix', 0, 2, 2);
+            model.result(pgTag).feature(volumeTag).feature('trn1').setIndex('transmatrix', 1, 2, 3);
+            model.result(pgTag).feature(volumeTag).feature('trn1').setIndex('transmatrix', 1, 3, 2);
+            model.result(pgTag).feature(volumeTag).feature('trn1').setIndex('transmatrix', 0, 3, 3);
+        catch
+        end
+    end
+
+    try
+        model.result(pgTag).feature(volumeTag).feature('trn1').active(true);
+    catch
+        try
+            model.result(pgTag).feature(volumeTag).feature('trn1').set('active', true);
+        catch
+        end
+    end
+end
+
+
+function set_plane_camera(model, viewTag, camDir, camUp)
+% Try multiple COMSOL LiveLink property-name conventions for camera orientation.
+% camDir : [dx dy dz] unit direction FROM which we look (toward origin).
+% camUp  : [ux uy uz] world-up vector.
+    propSets = {
+        {'pos',            'target',       'up'      };
+        {'position',       'target',       'up'      };
+        {'cameraposition', 'cameratarget', 'cameraup'};
+        {'cameraPosition', 'cameraTarget', 'cameraUp'};
+        {'campos',         'camtarget',    'camup'   };
+    };
+
+    for ip = 1:numel(propSets)
+        ps = propSets{ip};
+        % Try component view first (most COMSOL plot groups use component views)
+        try
+            model.component('comp1').view(viewTag).set(ps{1}, camDir);
+            model.component('comp1').view(viewTag).set(ps{2}, [0 0 0]);
+            model.component('comp1').view(viewTag).set(ps{3}, camUp);
+            return;
+        catch
+        end
+        % Try global model view
+        try
+            model.view(viewTag).set(ps{1}, camDir);
+            model.view(viewTag).set(ps{2}, [0 0 0]);
+            model.view(viewTag).set(ps{3}, camUp);
+            return;
+        catch
+        end
+    end
+    % All attempts silently failed; export will use whatever view COMSOL currently has.
+end
+
+
+function set_cutplane_axis_labels(model, plotGroupTag, planeName)
+    switch upper(strtrim(char(planeName)))
+        case 'XY'
+            xLabel = 'X';
+            yLabel = 'Y';
+        case 'XZ'
+            xLabel = 'X';
+            yLabel = 'Z';
+        case 'YZ'
+            xLabel = 'Y';
+            yLabel = 'Z';
+        otherwise
+            xLabel = 'X';
+            yLabel = 'Y';
+    end
+
+    try
+        model.result(plotGroupTag).set('xlabelactive', true);
+    catch
+    end
+    try
+        model.result(plotGroupTag).set('ylabelactive', true);
+    catch
+    end
+
+    try
+        model.result(plotGroupTag).set('xlabel', xLabel);
+    catch
+    end
+
+    try
+        model.result(plotGroupTag).set('ylabel', yLabel);
+    catch
+    end
+end
+
+
+function set_cutplane_str1_transformation(model, pgTag, strTag, planeName)
+    planeKey = lower(strtrim(char(planeName)));
+
+    if strcmp(planeKey, 'xy') || strcmp(planeKey, 'xz')
+        trnExists = false;
+        try
+            subTags = cell(model.result(pgTag).feature(strTag).feature.tags);
+            trnExists = any(strcmp(subTags, 'trn1'));
+        catch
+            trnExists = false;
+        end
+
+        if ~trnExists
+            try
+                model.result(pgTag).feature(strTag).create('trn1', 'Transformation');
+            catch
+            end
+        end
+
+        try
+            model.result(pgTag).feature(strTag).feature('trn1').set('transtype', 'general');
+        catch
+        end
+
+        try
+            model.result(pgTag).feature(strTag).feature('trn1').setIndex('transmatrix', -1, 0, 0);
+        catch
+        end
+
+        try
+            model.result(pgTag).feature(strTag).feature('trn1').active(true);
+        catch
+            try
+                model.result(pgTag).feature(strTag).feature('trn1').set('active', true);
+            catch
+            end
+        end
+    else
+        try
+            model.result(pgTag).feature(strTag).feature('trn1').active(false);
+        catch
+            try
+                model.result(pgTag).feature(strTag).feature('trn1').set('active', false);
+            catch
+            end
+        end
+    end
+end
+
+
+function configure_image_export(model, exportTag, plotGroupTag, outPath)
+    model.result.export(exportTag).set('plotgroup', plotGroupTag);
+
+    try
+        model.result.export(exportTag).set('filename', outPath);
+    catch
+    end
+    try
+        model.result.export(exportTag).set('pngfilename', outPath);
+    catch
+    end
+
+    try
+        model.result.export(exportTag).set('imagetype', 'png');
+    catch
+    end
+    try
+        model.result.export(exportTag).set('antialias', 'on');
+    catch
+    end
+    try
+        model.result.export(exportTag).set('zoomextents', 'on');
+    catch
+    end
+end
+
+
+function apply_view_orientation(model, plotGroupTag, viewName)
+    activeViewTag = '';
+    try
+        activeViewTag = char(model.result(plotGroupTag).getString('view'));
+    catch
+        activeViewTag = '';
+    end
+    activeViewTag = resolve_existing_view_tag(model, activeViewTag);
+
+    switch upper(strtrim(viewName))
+        case 'XY'
+            camPos = [0 0 1];
+            camUp = [0 1 0];
+        case 'XZ'
+            camPos = [0 -1 0];
+            camUp = [0 0 1];
+        case 'YZ'
+            camPos = [1 0 0];
+            camUp = [0 0 1];
+        otherwise
+            camPos = [1 1 1];
+            camUp = [0 0 1];
+    end
+
+    set_existing_view_vectors(model, activeViewTag, camPos, camUp);
+end
+
+
+function viewTag = resolve_existing_view_tag(model, candidateTag)
+    viewTag = strtrim(char(candidateTag));
+
+    if isempty(viewTag) || strcmpi(viewTag, 'auto')
+        viewTag = '';
+    end
+
+    if ~isempty(viewTag)
+        try
+            model.component('comp1').view(viewTag);
+            return
+        catch
+        end
+        try
+            model.view(viewTag);
+            return
+        catch
+        end
+        viewTag = '';
+    end
+
+    try
+        compViews = cell(model.component('comp1').view.tags);
+    catch
+        compViews = {};
+    end
+
+    if ~isempty(compViews)
+        if any(strcmp(compViews, 'view1'))
+            viewTag = 'view1';
+        else
+            viewTag = compViews{1};
+        end
+        return
+    end
+
+    try
+        globalViews = cell(model.view.tags);
+    catch
+        globalViews = {};
+    end
+
+    if ~isempty(globalViews)
+        if any(strcmp(globalViews, 'view1'))
+            viewTag = 'view1';
+        else
+            viewTag = globalViews{1};
+        end
+        return
+    end
+
+    viewTag = 'view1';
+end
+
+
+function set_existing_view_vectors(model, viewTag, camPos, camUp)
+    updated = false;
+    tagCandidates = {};
+
+    baseTag = strtrim(char(viewTag));
+    if ~isempty(baseTag)
+        tagCandidates{end+1} = baseTag;
+        if ~startsWith(baseTag, 'comp1_')
+            tagCandidates{end+1} = ['comp1_' baseTag];
+        end
+        if startsWith(baseTag, 'comp1_')
+            tagCandidates{end+1} = erase(baseTag, 'comp1_');
+        end
+    end
+
+    if isempty(tagCandidates)
+        tagCandidates = {'view1'};
+    end
+
+    % Try component views first (common in many COMSOL models)
+    for it = 1:numel(tagCandidates)
+        cand = tagCandidates{it};
+        try
+            model.component('comp1').view(cand).set('cameraPosition', camPos);
+            model.component('comp1').view(cand).set('cameraTarget', [0 0 0]);
+            model.component('comp1').view(cand).set('cameraUp', camUp);
+            try
+                model.component('comp1').view(cand).set('projection', 'orthographic');
+            catch
+            end
+            updated = true;
+            break
+        catch
+        end
+    end
+
+    % Try global model views
+    if ~updated
+        for it = 1:numel(tagCandidates)
+            cand = tagCandidates{it};
+            try
+                model.view(cand).set('cameraPosition', camPos);
+                model.view(cand).set('cameraTarget', [0 0 0]);
+                model.view(cand).set('cameraUp', camUp);
+                try
+                    model.view(cand).set('projection', 'orthographic');
+                catch
+                end
+                updated = true;
+                break
+            catch
+            end
+        end
+    end
+end
+
+
+function prepare_plot_for_export(model, plotGroupTag, enforceCamera)
+    ensure_rotated_view_exists(model);
+
+    if enforceCamera
+        camPos = [1 1 1];
+        camUp = [0 1 0];
+
+        enforce_rotated_view_camera(model);
+        assign_rotated_view_to_plotgroup(model, plotGroupTag);
+
+        activeViewTag = '';
+        try
+            activeViewTag = char(model.result(plotGroupTag).getString('view'));
+        catch
+            activeViewTag = '';
+        end
+        activeViewTag = resolve_existing_view_tag(model, activeViewTag);
+        set_existing_view_vectors(model, activeViewTag, camPos, camUp);
+        set_plane_camera(model, activeViewTag, camPos, camUp);
+
+        fprintf('   [DBG] prepare_plot_for_export plotGroup=%s forcedActiveView=%s\n', plotGroupTag, activeViewTag);
+    end
+
+    try
+        model.result(plotGroupTag).run;
+    catch
+    end
+    try
+        model.result(plotGroupTag).run;
+    catch
+    end
+end
+
+
+function reset_all_hidden_nodes(model)
+    fprintf('[DBG] Reset hidden nodes/entities in model views and geometries...\n');
+
+    compTags = {};
+    try
+        compTags = cell(model.component.tags);
+    catch
+        compTags = {'comp1'};
+    end
+
+    for ic = 1:numel(compTags)
+        compTag = compTags{ic};
+
+        viewTags = {};
+        try
+            viewTags = cell(model.component(compTag).view.tags);
+        catch
+            viewTags = {};
+        end
+
+        for iv = 1:numel(viewTags)
+            viewTag = viewTags{iv};
+
+            propCandidates = {
+                'showhiddenentities', 'on';
+                'showhiddenobjects',  'on';
+                'showhidden',         'on';
+                'showhiddengeom',     'on';
+                'showhiddengeomobj',  'on';
+                'showgeomobjects',    'on';
+                'showobjects',        'on';
+                'showmaterialdomains','on';
+                'showselection',      'on'
+            };
+
+            for ip = 1:size(propCandidates,1)
+                try
+                    model.component(compTag).view(viewTag).set(propCandidates{ip,1}, propCandidates{ip,2});
+                catch
+                end
+                try
+                    model.component(compTag).view(viewTag).set(propCandidates{ip,1}, true);
+                catch
+                end
+                try
+                    model.component(compTag).view(viewTag).set(propCandidates{ip,1}, 1);
+                catch
+                end
+            end
+
+            viewFeatTags = {};
+            try
+                viewFeatTags = cell(model.component(compTag).view(viewTag).feature.tags);
+            catch
+                viewFeatTags = {};
+            end
+
+            for ift = 1:numel(viewFeatTags)
+                ftag = viewFeatTags{ift};
+                flabel = '';
+                iftype = '';
+                try
+                    flabel = lower(char(model.component(compTag).view(viewTag).feature(ftag).label));
+                catch
+                end
+                try
+                    iftype = lower(char(model.component(compTag).view(viewTag).feature(ftag).getType));
+                catch
+                end
+
+                if contains(lower(ftag), 'hide') || contains(flabel, 'hide') || contains(iftype, 'hide')
+                    try
+                        model.component(compTag).view(viewTag).feature(ftag).active(false);
+                    catch
+                    end
+                    try
+                        model.component(compTag).view(viewTag).feature(ftag).set('active', false);
+                    catch
+                    end
+                end
+            end
+        end
+
+        geomTags = {};
+        try
+            geomTags = cell(model.component(compTag).geom.tags);
+        catch
+            geomTags = {};
+        end
+
+        for ig = 1:numel(geomTags)
+            geomTag = geomTags{ig};
+            geomFeatTags = {};
+            try
+                geomFeatTags = cell(model.component(compTag).geom(geomTag).feature.tags);
+            catch
+                geomFeatTags = {};
+            end
+
+            for ifg = 1:numel(geomFeatTags)
+                gftag = geomFeatTags{ifg};
+                gflabel = '';
+                gftype = '';
+                try
+                    gflabel = lower(char(model.component(compTag).geom(geomTag).feature(gftag).label));
+                catch
+                end
+                try
+                    gftype = lower(char(model.component(compTag).geom(geomTag).feature(gftag).getType));
+                catch
+                end
+
+                if contains(lower(gftag), 'hide') || contains(gflabel, 'hide') || contains(gftype, 'hide')
+                    try
+                        model.component(compTag).geom(geomTag).feature(gftag).active(false);
+                    catch
+                    end
+                    try
+                        model.component(compTag).geom(geomTag).feature(gftag).set('active', false);
+                    catch
+                    end
+                end
+            end
+
+            try
+                model.component(compTag).geom(geomTag).run;
+            catch
+            end
+        end
+    end
+
+    fprintf('[DBG] Hidden reset complete.\n');
+end
+
+
+function nHidden = hide_domains_by_label_for_plotgroup(model, plotGroupTag, domainLabels)
+    nHidden = 0;
+
+    if nargin < 3 || isempty(domainLabels)
+        return
+    end
+
+    activeViewTag = '';
+    try
+        activeViewTag = char(model.result(plotGroupTag).getString('view'));
+    catch
+        activeViewTag = '';
+    end
+    activeViewTag = resolve_existing_view_tag(model, activeViewTag);
+
+    % Hidden entities must not be displayed during 3D export, otherwise
+    % hidden domains can still appear as wireframe/context geometry.
+    set_showhidden_off_for_view(model, 'comp1', activeViewTag);
+    set_showhidden_off_for_global_view(model, activeViewTag);
+
+    for i = 1:numel(domainLabels)
+        requestedDomainLabel = char(domainLabels{i});
+        selTag = detect_comp1_selection_tag(model, {requestedDomainLabel});
+        if isempty(selTag)
+            fprintf('   [DBG] No comp1 named selection found for requested domain label: %s\n', requestedDomainLabel);
+            continue
+        end
+
+        hideTag = sprintf('tmphide_%s', regexprep(selTag, '[^a-zA-Z0-9_]', '_'));
+
+        applied = false;
+
+        try
+            model.component('comp1').view(activeViewTag).feature.remove(hideTag);
+        catch
+        end
+        try
+            model.component('comp1').view(activeViewTag).create(hideTag, 'Hide');
+        catch
+        end
+        try
+            model.component('comp1').view(activeViewTag).feature(hideTag).selection.named(selTag);
+            applied = true;
+        catch
+        end
+        if ~applied
+            try
+                model.component('comp1').view(activeViewTag).feature(hideTag).selection.named(['comp1_' selTag]);
+                applied = true;
+            catch
+            end
+        end
+        if applied
+            try
+                model.component('comp1').view(activeViewTag).feature(hideTag).active(true);
+            catch
+                try
+                    model.component('comp1').view(activeViewTag).feature(hideTag).set('active', true);
+                catch
+                end
+            end
+            nHidden = nHidden + 1;
+        end
+    end
+end
+
+
+function selectionTag = detect_comp1_selection_tag(model, requestedSelectionNames)
+    selectionTag = '';
+
+    if nargin < 2 || isempty(requestedSelectionNames)
+        return
+    end
+
+    comp1SelTags = {};
+    try
+        comp1SelTags = cell(model.component('comp1').selection.tags);
+    catch
+        comp1SelTags = {};
+    end
+
+    for s = 1:numel(comp1SelTags)
+        candidateTag = comp1SelTags{s};
+
+        for rn = 1:numel(requestedSelectionNames)
+            requestedName = requestedSelectionNames{rn};
+
+            if strcmpi(candidateTag, requestedName)
+                selectionTag = candidateTag;
+                break
+            end
+        end
+
+        if ~isempty(selectionTag)
+            break
+        end
+
+        try
+            candidateLabel = char(model.component('comp1').selection(candidateTag).label);
+            for rn = 1:numel(requestedSelectionNames)
+                requestedName = requestedSelectionNames{rn};
+                if strcmpi(candidateLabel, requestedName)
+                    selectionTag = candidateTag;
+                    break
+                end
+            end
+            if ~isempty(selectionTag)
+                break
+            end
+        catch
+            % ignore selections whose label cannot be queried
+        end
+    end
+end
+
+
+function set_showhidden_off_for_view(model, compTag, viewTag)
+    propNames = {
+        'showhiddenentities',
+        'showhiddenobjects',
+        'showhidden',
+        'showhiddengeom',
+        'showhiddengeomobj'
+    };
+
+    for i = 1:numel(propNames)
+        p = propNames{i};
+        try
+            model.component(compTag).view(viewTag).set(p, 'off');
+        catch
+        end
+        try
+            model.component(compTag).view(viewTag).set(p, false);
+        catch
+        end
+        try
+            model.component(compTag).view(viewTag).set(p, 0);
+        catch
+        end
+    end
+end
+
+
+function set_showhidden_off_for_global_view(model, viewTag)
+    propNames = {
+        'showhiddenentities',
+        'showhiddenobjects',
+        'showhidden',
+        'showhiddengeom',
+        'showhiddengeomobj'
+    };
+
+    for i = 1:numel(propNames)
+        p = propNames{i};
+        try
+            model.view(viewTag).set(p, 'off');
+        catch
+        end
+        try
+            model.view(viewTag).set(p, false);
+        catch
+        end
+        try
+            model.view(viewTag).set(p, 0);
+        catch
+        end
+    end
+end
+
+
+function txtPath = get_simulation_txt_path(baseFolder)
+    [~, folderName] = fileparts(baseFolder);
+    folderKey = upper(strtrim(folderName));
+
+    if endsWith(folderKey, 'GX')
+        fileName = 'GX_Simulations_extracted_data.txt';
+    elseif endsWith(folderKey, 'GY')
+        fileName = 'GY_Simulations_extracted_data.txt';
+    elseif endsWith(folderKey, 'GZ')
+        fileName = 'GZ_Simulations_extracted_data.txt';
+    else
+        fileName = 'Simulations_extracted_data.txt';
+    end
+
+    txtPath = fullfile(baseFolder, fileName);
+end
+
+
+function didWrite = upsert_simulation_txt_column(txtPath, datasetLabel, metricNames, metricValues)
+    didWrite = false;
+    nMetrics = numel(metricNames);
+    nRows = nMetrics + 1;
+
+    raw = {};
+    if exist(txtPath, 'file')
+        try
+            raw = readcell(txtPath, 'FileType', 'text', 'Delimiter', '\t');
+        catch
+            raw = {};
+        end
+    end
+
+    if isempty(raw)
+        raw = cell(nRows, 1);
+    end
+
+    outCols = max(size(raw, 2), 1);
+    out = cell(nRows, outCols);
+    out(:) = {[]};
+
+    rCopy = min(size(raw, 1), nRows);
+    cCopy = min(size(raw, 2), outCols);
+    if rCopy > 0 && cCopy > 0
+        out(1:rCopy, 1:cCopy) = raw(1:rCopy, 1:cCopy);
+    end
+
+    out{1,1} = 'Metric';
+    for i = 1:nMetrics
+        out{i+1, 1} = metricNames{i};
+    end
+
+    datasetLabel = char(string(datasetLabel));
+    colIdx = [];
+    for c = 2:size(out,2)
+        headerVal = out{1,c};
+        if ischar(headerVal) || isstring(headerVal)
+            if strcmpi(strtrim(char(string(headerVal))), strtrim(datasetLabel))
+                colIdx = c;
+                break
+            end
+        end
+    end
+
+    if ~isempty(colIdx)
+        userAnswer = input(sprintf('La columna "%s" ya existe en %s. Deseas sobreescribirla? [s/N]: ', datasetLabel, txtPath), 's');
+        userAnswer = lower(strtrim(char(string(userAnswer))));
+        if isempty(userAnswer)
+            userAnswer = 'n';
+        end
+        if ~any(strcmp(userAnswer, {'s','si','y','yes'}))
+            fprintf('   [INFO] No se sobreescribio la columna "%s".\n', datasetLabel);
+            return
+        end
+    end
+
+    if isempty(colIdx)
+        colIdx = size(out,2) + 1;
+        out(:, colIdx) = {[]};
+    end
+
+    out{1, colIdx} = datasetLabel;
+    for i = 1:nMetrics
+        out{i+1, colIdx} = format_value_with_decimal_comma(metricValues(i));
+    end
+
+    for r = 1:size(out,1)
+        for c = 1:size(out,2)
+            val = out{r,c};
+            if ismissing(val)
+                out{r,c} = '';
+            elseif isstring(val)
+                out{r,c} = char(val);
+            elseif isnumeric(val)
+                out{r,c} = format_value_with_decimal_comma(val);
+            elseif isempty(val)
+                out{r,c} = '';
+            end
+        end
+    end
+
+    write_quoted_tab_text(out, txtPath);
+    didWrite = true;
+end
+
+
+function s = format_value_with_decimal_comma(v)
+    v = to_scalar_or_nan(v);
+    if isnan(v)
+        s = '';
+        return
+    end
+
+    s = sprintf('%.15g', v);
+    s = strrep(s, '.', ',');
+end
+
+
+function write_quoted_tab_text(cellData, filePath)
+    fid = fopen(filePath, 'w');
+    if fid == -1
+        error('Could not open TXT output file: %s', filePath)
+    end
+
+    cleaner = onCleanup(@() fclose(fid));
+
+    nRows = size(cellData, 1);
+    nCols = size(cellData, 2);
+
+    for r = 1:nRows
+        fields = cell(1, nCols);
+        for c = 1:nCols
+            v = cellData{r, c};
+
+            if ismissing(v)
+                s = '';
+            elseif isstring(v)
+                s = char(v);
+            elseif ischar(v)
+                s = v;
+            elseif isnumeric(v)
+                s = format_value_with_decimal_comma(v);
+            elseif isempty(v)
+                s = '';
+            else
+                s = char(string(v));
+            end
+
+            s = strrep(s, '"', '""');
+            fields{c} = ['"' s '"'];
+        end
+
+        fprintf(fid, '%s\n', strjoin(fields, sprintf('\t')));
+    end
+end
+
+
+function v = safe_get_numerical_scalar(model, numericalTag)
+    v = nan;
+    raw = [];
+
+    try
+        raw = model.result.numerical(numericalTag).getReal;
+    catch
+        try
+            raw = model.result.numerical(numericalTag).getData;
+        catch
+            raw = [];
+        end
+    end
+
+    v = to_scalar_or_nan(raw);
+end
+
+
+function v = to_scalar_or_nan(raw)
+    v = nan;
+    if isempty(raw)
+        return
+    end
+
+    try
+        nums = double(raw);
+    catch
+        try
+            nums = cell2mat(raw);
+        catch
+            nums = [];
+        end
+    end
+
+    if isempty(nums)
+        return
+    end
+
+    nums = nums(:);
+    finiteVals = nums(isfinite(nums));
+    if isempty(finiteVals)
+        return
+    end
+
+    v = finiteVals(1);
+end
+
+
+function safe_remove_result_dataset(model, datasetTag)
+    try
+        model.result.dataset.remove(datasetTag);
+    catch
+    end
+end
+
+
+function safe_remove_result_numerical(model, numericalTag)
+    try
+        model.result.numerical.remove(numericalTag);
+    catch
+    end
+end
+
+
+function apply_named_selection_to_numerical(model, numericalTag, detectedTag, requestedName, requestedNames)
+    assigned = false;
+
+    if ~isempty(detectedTag)
+        try
+            model.result.numerical(numericalTag).selection.named(detectedTag);
+            assigned = true;
+        catch
+        end
+        if ~assigned
+            try
+                model.result.numerical(numericalTag).selection.named(['comp1_' detectedTag]);
+                assigned = true;
+            catch
+            end
+        end
+    end
+
+    if ~assigned && ~isempty(requestedName)
+        try
+            model.result.numerical(numericalTag).selection.named(requestedName);
+            assigned = true;
+        catch
+        end
+        if ~assigned
+            try
+                model.result.numerical(numericalTag).selection.named(['comp1_' requestedName]);
+                assigned = true;
+            catch
+            end
+        end
+    end
+
+    if ~assigned
+        for i = 1:numel(requestedNames)
+            nm = requestedNames{i};
+            try
+                model.result.numerical(numericalTag).selection.named(nm);
+                assigned = true;
+                break
+            catch
+            end
+            try
+                model.result.numerical(numericalTag).selection.named(['comp1_' nm]);
+                assigned = true;
+                break
+            catch
+            end
+        end
+    end
+
+    if ~assigned
+        warning('Could not apply named selection to numerical feature %s.', numericalTag)
+    end
+end
+
