@@ -1,0 +1,7 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# OS junk
+Thumbs.db
+.DS_Store
