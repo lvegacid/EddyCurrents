@@ -1,7 +1,20 @@
 # Python cache
 __pycache__/
 *.py[cod]
+*.pyc
+*.pyo
+*.pyd
 
 # OS junk
 Thumbs.db
 .DS_Store
+
+# Project ignores
+.vscode/
+.pytest_cache/
+*.mat
+*.png
+*.jpg
+*.jpeg
+*.zip
+Data/
