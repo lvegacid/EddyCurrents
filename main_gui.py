@@ -2,48 +2,32 @@
 
 import sys
 import os
-
-# --- utility to ensure required libraries are installed ---
+import importlib.util
 import subprocess
+import shutil
+import re
+import numpy as np
+import pandas as pd
 
-# force matplotlib to use a non-interactive backend before any pyplot import
-# this prevents Qt5Agg from trying to create a second QApplication and
-# crashing the GUI when the user requests a plot.  The original problem
-# manifested as the entire window closing whenever "Analyze" or other
-# plotting actions were triggered.
 import matplotlib
 matplotlib.use("Agg")
 
+
 def _ensure_package(pkg_name: str):
-    """Import a package, installing it via pip if missing."""
     try:
         __import__(pkg_name)
     except ImportError:
         print(f"Package '{pkg_name}' not found; installing...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", pkg_name])
-        try:
-            __import__(pkg_name)
-        except ImportError as e:
-            print(f"Failed to import '{pkg_name}' after installation: {e}")
-            raise
+        __import__(pkg_name)
 
-# list dependencies used throughout the application
-for _pkg in [
-    "numpy", "scipy", "matplotlib", "pandas", "PyQt5", "scipy.io"
-]:
+
+for _pkg in ["numpy", "scipy", "matplotlib", "pandas", "PyQt5", "scipy.io"]:
     _ensure_package(_pkg)
 
-# --- Make script self-contained (fix import path) ---
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
-
-# -----------------------------------------
-
-import shutil
-import re
-import numpy as np
-import pandas as pd
 
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
@@ -59,27 +43,19 @@ from analysis.measured_analysis import (
     run_measured_analysis,
     run_fid_analysis,
     run_phase_analysis,
-    extract_filter_metrics_sweep
+    extract_filter_metrics_sweep,
 )
 from analysis.compare_with_simulation import compare_with_simulation, load_measured_table
 from analysis.sequence_analysis import sequenceAnalysis
 
 
-# =========================================================
-# DRAG & DROP FILE LIST
-# =========================================================
-
 class FileList(QListWidget):
     def __init__(self):
         super().__init__()
-
         self.setAcceptDrops(True)
         self.setDragEnabled(True)
         self.setMinimumHeight(40)
-        self.setMaximumHeight(60)
-
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setMaximumHeight(80)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -94,118 +70,48 @@ class FileList(QListWidget):
             event.ignore()
 
     def dropEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-            for url in event.mimeData().urls():
-                file_path = url.toLocalFile()
-                if os.path.isfile(file_path):
-                    self.addItem(file_path)
-        else:
+        if not event.mimeData().hasUrls():
             event.ignore()
+            return
+        event.acceptProposedAction()
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path:
+                self.addItem(path)
 
-
-# subclass used specifically for comparison list so that the
-# parent GUI instance can handle the drop event and prompt for a name
-class CompareFileList(FileList):
-    def __init__(self, gui=None):
-        super().__init__()
-        # keep a reference to the main GUI so we can call its handler
-        self._gui = gui
-
-    def dropEvent(self, event):
-        print(f"[CompareFileList] dropEvent triggered")
-        # delegate to the GUI method if available; otherwise fallback
-        if self._gui is not None:
-            print(f"[CompareFileList] Delegating to GUI handler")
-            if event.mimeData().hasUrls():
-                event.acceptProposedAction()
-                self._gui.compare_drop_event(event)
-            else:
-                event.ignore()
-        else:
-            print(f"[CompareFileList] No GUI - using parent handler")
-            super().dropEvent(event)
-
-
-# =========================================================
-# CUSTOM WIDGET FOR COMPARE FILE ITEMS
-# =========================================================
 
 class CompareFileItemWidget(QWidget):
-    """Custom widget for each item in the compare files list.
-    Contains file path, label input field, and control buttons."""
-
-    def __init__(self, file_path, label="", parent=None):
-        super().__init__(parent)
+    def __init__(self, file_path, default_label):
+        super().__init__()
         self.file_path = file_path
-        self.label_input = None
-        self.label = label
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(5, 3, 5, 3)
-        layout.setSpacing(8)
-
-        # File name label
-        file_name = os.path.basename(file_path)
-        file_label = QLabel(file_name)
-        file_label.setMaximumWidth(200)
-        layout.addWidget(file_label)
-
-        # Label input
-        self.label_input = QLineEdit()
-        self.label_input.setPlaceholderText("Enter label (gradient name)")
-        self.label_input.setText(label)
-        self.label_input.setMinimumWidth(150)
-        layout.addWidget(self.label_input)
-
-        # Remove button
-        remove_btn = QPushButton("Remove")
-        remove_btn.setMaximumWidth(80)
-        remove_btn.clicked.connect(self.on_remove)
-        layout.addWidget(remove_btn)
-
-        layout.addStretch()
-
         self.remove_callback = None
 
-    def get_label(self):
-        """Get the current label from the input field."""
-        if self.label_input:
-            return self.label_input.text().strip()
-        return self.label
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 2)
 
-    def set_label(self, label):
-        """Set the label in the input field."""
-        if self.label_input:
-            self.label_input.setText(label)
-        self.label = label
+        self._label_edit = QLineEdit(default_label)
+        layout.addWidget(self._label_edit)
 
-    def on_remove(self):
-        """Trigger removal callback when Remove button is clicked."""
-        if self.remove_callback:
+        rm_btn = QPushButton("Remove")
+        rm_btn.clicked.connect(self._on_remove)
+        layout.addWidget(rm_btn)
+
+    def _on_remove(self):
+        if callable(self.remove_callback):
             self.remove_callback(self.file_path)
 
-    def sizeHint(self):
-        """Return preferred size for this widget."""
-        from PyQt5.QtCore import QSize
-        return QSize(600, 40)
+    def get_label(self):
+        text = self._label_edit.text().strip()
+        return text if text else os.path.splitext(os.path.basename(self.file_path))[0]
 
-
-# =========================================================
-# CUSTOM LIST WIDGET FOR COMPARE FILES
-# =========================================================
 
 class CompareFileListWidget(QListWidget):
-    """Custom QListWidget that accepts drag & drop and notifies GUI."""
-
-    def __init__(self, gui_ref=None, parent=None):
-        super().__init__(parent)
-        self._gui_ref = gui_ref
+    def __init__(self, gui_ref=None):
+        super().__init__()
+        self.gui_ref = gui_ref
         self.setAcceptDrops(True)
+        self.setDragEnabled(False)
         self.setMinimumHeight(80)
-        self.setMaximumHeight(160)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -218,258 +124,143 @@ class CompareFileListWidget(QListWidget):
             event.acceptProposedAction()
         else:
             event.ignore()
+
+    def dropEvent(self, event):
+        if self.gui_ref is not None and hasattr(self.gui_ref, "compare_drop_event"):
+            self.gui_ref.compare_drop_event(event)
+            return
+        event.ignore()
 
 
 class CopyableTableWidget(QTableWidget):
     def keyPressEvent(self, event):
         if event.matches(QKeySequence.Copy):
-            selected = self.selectedRanges()
-            if not selected:
+            ranges = self.selectedRanges()
+            if not ranges:
                 return
-
-            pieces = []
-            for selection in selected:
-                rows = []
-                for row in range(selection.topRow(), selection.bottomRow() + 1):
-                    values = []
-                    for col in range(selection.leftColumn(), selection.rightColumn() + 1):
-                        item = self.item(row, col)
-                        values.append(item.text() if item is not None else "")
-                    rows.append("\t".join(values))
-                pieces.append("\n".join(rows))
-
-            QApplication.clipboard().setText("\n".join(pieces))
+            r = ranges[0]
+            lines = []
+            for row in range(r.topRow(), r.bottomRow() + 1):
+                vals = []
+                for col in range(r.leftColumn(), r.rightColumn() + 1):
+                    item = self.item(row, col)
+                    vals.append(item.text() if item is not None else "")
+                lines.append("\t".join(vals))
+            QApplication.clipboard().setText("\n".join(lines))
             return
-
         super().keyPressEvent(event)
 
-    def dropEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-            if self._gui_ref and hasattr(self._gui_ref, 'compare_drop_event'):
-                self._gui_ref.compare_drop_event(event)
-        else:
-            event.ignore()
-
-
-# =========================================================
-# WIDGETS
-# =========================================================
-
-
-# =========================================================
-# POSTPROCESS DIALOGS
-# =========================================================
 
 class _AddManuallyDialog(QDialog):
-    """Step-by-step dialog for manually adding files to a position folder."""
-
-    def __init__(self, gui_ref, parent=None):
+    def __init__(self, gui, parent=None):
         super().__init__(parent)
-        self._gui = gui_ref
+        self._gui = gui
         self.setWindowTitle("Add files manually")
-        self.setMinimumWidth(540)
+        self.setMinimumWidth(600)
+
         layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Select .mat files and copy them into the selected Setup/Phantom folder."))
 
-        grp1 = QGroupBox("Step 1 – Select parent directory")
-        grp1_lay = QHBoxLayout(grp1)
-        self._path_edit = QLineEdit()
-        self._path_edit.setMinimumWidth(320)
-        if gui_ref.base_path:
-            self._path_edit.setText(gui_ref.base_path)
-        grp1_lay.addWidget(self._path_edit)
-        btn_browse = QPushButton("Browse")
-        btn_browse.clicked.connect(self._browse_path)
-        grp1_lay.addWidget(btn_browse)
-        layout.addWidget(grp1)
-
-        grp_setup = QGroupBox("Setup")
-        grp_setup_lay = QHBoxLayout(grp_setup)
-        self._setup_combo = QComboBox()
-        self._setup_combo.setMinimumWidth(200)
-        grp_setup_lay.addWidget(self._setup_combo)
-        grp_setup_lay.addStretch()
-        layout.addWidget(grp_setup)
-        self._path_edit.textChanged.connect(self._refresh_setups)
-        self._refresh_setups()
-        if gui_ref.setup_combo.currentText():
-            idx = self._setup_combo.findText(gui_ref.setup_combo.currentText())
-            if idx >= 0:
-                self._setup_combo.setCurrentIndex(idx)
-
-        grp2 = QGroupBox("Step 2 – Select position")
-        grp2_lay = QHBoxLayout(grp2)
-        self._pos_combo = QComboBox()
-        self._pos_combo.addItems(["Center", "+X", "-X", "+Y", "-Y", "+Z", "-Z"])
-        grp2_lay.addWidget(self._pos_combo)
-        grp2_lay.addStretch()
-        layout.addWidget(grp2)
-
-        grp3 = QGroupBox("Step 3 – Select files  (Browse or Drag & Drop)")
-        grp3_lay = QVBoxLayout(grp3)
-        file_btn_row = QHBoxLayout()
-        btn_browse_files = QPushButton("Browse files")
-        btn_browse_files.clicked.connect(self._browse_files)
-        file_btn_row.addWidget(btn_browse_files)
-        btn_clear = QPushButton("Clear")
-        btn_clear.clicked.connect(lambda: self._file_list.clear())
-        file_btn_row.addWidget(btn_clear)
-        file_btn_row.addStretch()
-        grp3_lay.addLayout(file_btn_row)
-        self._file_list = FileList()
-        self._file_list.setMinimumHeight(80)
-        self._file_list.setMaximumHeight(140)
-        grp3_lay.addWidget(self._file_list)
-        layout.addWidget(grp3)
+        self._files = FileList()
+        layout.addWidget(self._files)
 
         btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        btn_confirm = QPushButton("Confirm")
-        btn_confirm.setDefault(True)
-        btn_confirm.clicked.connect(self._confirm)
-        btn_row.addWidget(btn_confirm)
-        btn_cancel = QPushButton("Cancel")
-        btn_cancel.clicked.connect(self.reject)
-        btn_row.addWidget(btn_cancel)
+        browse_btn = QPushButton("Add files")
+        browse_btn.clicked.connect(self._browse_files)
+        btn_row.addWidget(browse_btn)
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(self._files.clear)
+        btn_row.addWidget(clear_btn)
         layout.addLayout(btn_row)
 
-    def _browse_path(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select parent directory")
-        if folder:
-            self._path_edit.setText(folder)
-
-    def _refresh_setups(self):
-        self._setup_combo.blockSignals(True)
-        prev = self._setup_combo.currentText()
-        self._setup_combo.clear()
-        path = self._path_edit.text().strip()
-        if path and os.path.isdir(path):
-            for f in sorted(os.listdir(path)):
-                if os.path.isdir(os.path.join(path, f)):
-                    self._setup_combo.addItem(f)
-        if prev:
-            idx = self._setup_combo.findText(prev)
-            if idx >= 0:
-                self._setup_combo.setCurrentIndex(idx)
-        self._setup_combo.blockSignals(False)
+        run_row = QHBoxLayout()
+        run_btn = QPushButton("Copy")
+        run_btn.clicked.connect(self._run_copy)
+        run_row.addWidget(run_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        run_row.addWidget(cancel_btn)
+        layout.addLayout(run_row)
 
     def _browse_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "Select files")
+        files, _ = QFileDialog.getOpenFileNames(self, "Select .mat files", "", "MAT Files (*.mat)")
         for f in files:
-            self._file_list.addItem(f)
+            self._files.addItem(f)
 
-    def _confirm(self):
-        path = self._path_edit.text().strip()
-        setup = self._setup_combo.currentText()
-        position = self._gui._canonical_phantom_position(self._pos_combo.currentText())
-        if not path or not os.path.isdir(path):
-            QMessageBox.warning(self, "Warning", "Select a valid parent directory.")
+    def _run_copy(self):
+        if self._files.count() == 0:
+            QMessageBox.warning(self, "Add files", "No files selected.")
             return
-        if not setup:
-            QMessageBox.warning(self, "Warning", "Select a Setup.")
-            return
-        if self._file_list.count() == 0:
-            QMessageBox.warning(self, "Warning", "No files selected.")
-            return
-        target_dir = os.path.join(path, setup, position)
+
+        base_path = self._gui.base_path
+        setup = self._gui.setup_combo.currentText().strip()
+        phantom = self._gui._canonical_phantom_position(self._gui.phantom_combo.currentText())
+        target_dir = os.path.join(base_path, setup, phantom)
         os.makedirs(target_dir, exist_ok=True)
-        files_to_copy = [self._file_list.item(i).text() for i in range(self._file_list.count())]
-        already_exist = [
-            f for f in files_to_copy
-            if os.path.exists(os.path.join(target_dir, os.path.basename(f)))
-        ]
-        if already_exist:
-            msg_box = QMessageBox(self)
-            msg_box.setWindowTitle("Files already exist")
-            msg_box.setText(f"{len(already_exist)} file(s) already exist in:\n{target_dir}")
-            msg_box.setInformativeText("Overwrite or Cancel?")
-            btn_overwrite = msg_box.addButton("Overwrite", QMessageBox.AcceptRole)
-            msg_box.addButton("Cancel", QMessageBox.RejectRole)
-            msg_box.exec_()
-            if msg_box.clickedButton() is not btn_overwrite:
-                return
-        try:
-            import shutil as _sh
-            for f in files_to_copy:
-                _sh.copy2(f, os.path.join(target_dir, os.path.basename(f)))
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Copy failed:\n{e}")
-            return
-        self._file_list.clear()
-        reply = QMessageBox.question(
-            self, "Files added",
-            f"{len(files_to_copy)} file(s) copied to:\n{target_dir}\n\nAnalyze files now?",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        if reply == QMessageBox.Yes:
-            self._gui.base_path = path
-            self._gui.path_edit.setText(path)
-            self._gui.update_setup_dropdown()
-            self._gui.setup_combo.setCurrentText(setup)
-            self._gui.phantom_combo.setCurrentText(self._pos_combo.currentText())
-            self._gui.run_analysis_all_positions()
+
+        copied = 0
+        failed = []
+        for i in range(self._files.count()):
+            src = self._files.item(i).text().strip()
+            if not os.path.isfile(src):
+                failed.append(src)
+                continue
+            try:
+                shutil.copy2(src, os.path.join(target_dir, os.path.basename(src)))
+                copied += 1
+            except Exception:
+                failed.append(src)
+
+        self._gui._refresh_compare_measured_columns()
+        if failed:
+            QMessageBox.warning(self, "Add files", f"Copied: {copied}\nFailed: {len(failed)}")
+        else:
+            QMessageBox.information(self, "Add files", f"Copied {copied} files to:\n{target_dir}")
         self.accept()
 
 
 class _PostprocessAnalyzeDialog(QDialog):
-    """Dialog for the Analyze files postprocess workflow."""
-
     PREFERRED = ["Center", "+X", "-X", "+Y", "-Y", "+Z", "-Z"]
 
-    def __init__(self, gui_ref, parent=None):
+    def __init__(self, gui, parent=None):
         super().__init__(parent)
-        self._gui = gui_ref
-        self.setWindowTitle("Analyze files")
-        self.setMinimumWidth(560)
+        self._gui = gui
+        self.setWindowTitle("Analyze all positions")
+        self.setMinimumWidth(620)
+
         layout = QVBoxLayout(self)
 
-        # Step 1 — parent folder (base path)
-        grp1 = QGroupBox("Step 1 – Select parent folder")
-        grp1_lay = QHBoxLayout(grp1)
-        self._path_edit = QLineEdit()
-        self._path_edit.setMinimumWidth(380)
-        self._path_edit.setPlaceholderText("Folder that contains setup subfolders")
-        if getattr(self._gui, "base_path", None):
-            self._path_edit.setText(self._gui.base_path)
-        grp1_lay.addWidget(self._path_edit)
-        btn_browse = QPushButton("Browse")
-        btn_browse.clicked.connect(self._browse_path)
-        grp1_lay.addWidget(btn_browse)
-        layout.addWidget(grp1)
+        path_row = QHBoxLayout()
+        path_row.addWidget(QLabel("Parent folder"))
+        self._path_edit = QLineEdit(self._gui.base_path or "")
+        path_row.addWidget(self._path_edit)
+        browse_btn = QPushButton("Browse")
+        browse_btn.clicked.connect(self._browse_path)
+        path_row.addWidget(browse_btn)
+        layout.addLayout(path_row)
 
-        # Step 2 — setup subfolder
-        grp2 = QGroupBox("Step 2 – Select subfolder")
-        grp2_lay = QHBoxLayout(grp2)
+        setup_row = QHBoxLayout()
+        setup_row.addWidget(QLabel("Setup"))
         self._setup_combo = QComboBox()
-        self._setup_combo.setMinimumWidth(220)
-        grp2_lay.addWidget(self._setup_combo)
-        grp2_lay.addStretch()
-        layout.addWidget(grp2)
-
-        # Step 3 — position
-        grp3 = QGroupBox("Step 3 – Select position")
-        grp3_lay = QHBoxLayout(grp3)
+        setup_row.addWidget(self._setup_combo)
+        setup_row.addWidget(QLabel("Position"))
         self._pos_combo = QComboBox()
-        self._pos_combo.setMinimumWidth(120)
-        self._pos_combo.addItems(self.PREFERRED + ["All"])
-        grp3_lay.addWidget(self._pos_combo)
-        grp3_lay.addStretch()
-        layout.addWidget(grp3)
+        setup_row.addWidget(self._pos_combo)
+        layout.addLayout(setup_row)
 
-        self._path_edit.textChanged.connect(self._refresh_setups)
         self._setup_combo.currentIndexChanged.connect(self._refresh_positions)
-        self._refresh_setups()
+        self._path_edit.textChanged.connect(self._refresh_setups)
 
         btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        run_btn = QPushButton("Analyze")
-        run_btn.setDefault(True)
+        run_btn = QPushButton("Run")
         run_btn.clicked.connect(self._run)
         btn_row.addWidget(run_btn)
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
         layout.addLayout(btn_row)
+
+        self._refresh_setups()
 
     def _browse_path(self):
         folder = QFileDialog.getExistingDirectory(self, "Select parent folder")
@@ -512,11 +303,9 @@ class _PostprocessAnalyzeDialog(QDialog):
         if setup_path and os.path.isdir(setup_path):
             existing = [
                 f for f in os.listdir(setup_path)
-                if os.path.isdir(os.path.join(setup_path, f))
-                and f != "Experimental_data"
+                if os.path.isdir(os.path.join(setup_path, f)) and f != "Experimental_data"
             ]
-            ordered = [p for p in self.PREFERRED if p in existing] + \
-                      [p for p in sorted(existing) if p not in self.PREFERRED]
+            ordered = [p for p in self.PREFERRED if p in existing] + [p for p in sorted(existing) if p not in self.PREFERRED]
             self._pos_combo.addItems(ordered)
         else:
             self._pos_combo.addItems(self.PREFERRED)
@@ -542,7 +331,6 @@ class _PostprocessAnalyzeDialog(QDialog):
             QMessageBox.warning(self, "Warning", "No setup subfolders found in the selected parent folder.")
             return
 
-        # update main GUI state silently (block signals to avoid crashes)
         self._gui.base_path = parent_path
         self._gui.path_edit.blockSignals(True)
         self._gui.path_edit.setText(parent_path)
@@ -556,8 +344,7 @@ class _PostprocessAnalyzeDialog(QDialog):
 
         apply_filter = self._gui.filter_checkbox.isChecked()
         try:
-            beprefilter_cutoff = float(
-                self._gui.beprefilter_cutoff_combo.currentText().split()[0])
+            beprefilter_cutoff = float(self._gui.beprefilter_cutoff_combo.currentText().split()[0])
         except Exception:
             beprefilter_cutoff = 0.08
         try:
@@ -565,7 +352,7 @@ class _PostprocessAnalyzeDialog(QDialog):
         except Exception:
             beprefilter_order = 4
 
-        self.accept()   # close dialog before running (avoids event-loop nesting)
+        self.accept()
 
         success = 0
         failed = []
@@ -604,7 +391,7 @@ class _PostprocessAnalyzeDialog(QDialog):
                         nDelay_selected="All",
                         apply_filter=apply_filter,
                         beprefilter_cutoff=beprefilter_cutoff,
-                        beprefilter_order=beprefilter_order
+                        beprefilter_order=beprefilter_order,
                     )
                     success += 1
                 except Exception as e:
@@ -624,7 +411,7 @@ class _PostprocessAnalyzeDialog(QDialog):
             QMessageBox.information(
                 self._gui,
                 "Analyze files",
-                f"Analysis complete. Processed positions: {success}\nParent folder:\n{parent_path}"
+                f"Analysis complete. Processed positions: {success}\nParent folder:\n{parent_path}",
             )
 
 
@@ -1330,6 +1117,9 @@ class EddyCurrentGUI(QWidget):
         self.filter_checkbox = QCheckBox("Filter")
         analyze_row.addWidget(self.filter_checkbox)
 
+        self.exp_fit_checkbox = QCheckBox("Exponential fit")
+        analyze_row.addWidget(self.exp_fit_checkbox)
+
         analyze_row.addSpacing(12)
         analyze_row.addWidget(QLabel("BePrefilter cutoff (Wn)"))
         self.beprefilter_cutoff_combo = QComboBox()
@@ -1394,16 +1184,14 @@ class EddyCurrentGUI(QWidget):
 
         compare_row.addSpacing(20)
 
-        compare_row.addWidget(QLabel("Measured column"))
+        compare_row.addWidget(QLabel("Metrics"))
         self.compare_meas_combo = QComboBox()
         self.compare_meas_combo.addItems([
             "B_measured_at_t0_FirstPoint",
             "B_measured_at_t0_Fitted",
             "B_measured_at_t0_PreFiltered",
             "B_integrated",
-            "B_integrated_1ms",
-            "B_integrated_5ms",
-            "B_integrated_10ms",
+            "Exp_fit",
         ])
         compare_row.addWidget(self.compare_meas_combo)
 
@@ -1922,6 +1710,9 @@ class EddyCurrentGUI(QWidget):
             return
 
         previous = self.compare_meas_combo.currentText().strip()
+        prev_match = re.match(r"^(B_integrated(?:_.+)?)_\d+(?:\.\d+)?ms$", previous)
+        if prev_match:
+            previous = prev_match.group(1)
         columns = []
 
         base = (self.base_path or "").strip()
@@ -1976,9 +1767,12 @@ class EddyCurrentGUI(QWidget):
                 "B_measured_at_t0_Fitted",
                 "B_measured_at_t0_PreFiltered",
                 "B_integrated",
-                "B_integrated_5ms",
-                "B_integrated_10ms",
             ]
+
+        # Keep raw (non-canonicalized) columns for extraction logic.
+        self._compare_measured_raw_columns = list(columns)
+
+        columns = self._build_metric_options(columns)
 
         self.compare_meas_combo.blockSignals(True)
         self.compare_meas_combo.clear()
@@ -1986,6 +1780,166 @@ class EddyCurrentGUI(QWidget):
         if previous and previous in columns:
             self.compare_meas_combo.setCurrentText(previous)
         self.compare_meas_combo.blockSignals(False)
+
+    def _build_metric_options(self, raw_columns):
+        options = []
+        seen = set()
+
+        for col in raw_columns:
+            name = str(col).strip()
+            if not name:
+                continue
+            if name.lower().startswith("unnamed:"):
+                continue
+            if name in ("Grad", "Phantom_position"):
+                continue
+            if "rmse%" in name.lower():
+                continue
+
+            canonical = name
+            if name.startswith("B_integrated"):
+                m = re.match(r"^(B_integrated(?:_.+)?)_\d+(?:\.\d+)?ms$", name)
+                if m:
+                    canonical = m.group(1)
+            if canonical in seen:
+                continue
+
+            seen.add(canonical)
+            options.append(canonical)
+
+        for special in ["B_integrated", "Exp_fit"]:
+            if special not in seen:
+                options.append(special)
+                seen.add(special)
+
+        return options
+
+    def _ask_b_integrated_window_selection(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("B_integrated windows")
+        layout = QVBoxLayout(dlg)
+
+        layout.addWidget(QLabel("Select time windows to include for selected B_integrated metrics:"))
+
+        window_order = ["1ms", "3ms", "5ms", "10ms", "All"]
+        checks = []
+        for w in window_order:
+            cb = QCheckBox(w)
+            cb.setChecked(False)
+            checks.append((w, cb))
+            layout.addWidget(cb)
+
+        btn_row = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        cancel_btn = QPushButton("Cancel")
+        btn_row.addWidget(ok_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+        ok_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+
+        if dlg.exec_() != QDialog.Accepted:
+            return None
+
+        selected = [w for w, cb in checks if cb.isChecked()]
+        if not selected:
+            QMessageBox.warning(self, "Warning", "Select at least one B_integrated window.")
+            return None
+        return selected
+
+    def _ask_single_b_integrated_window(self):
+        items = ["All", "1ms", "3ms", "5ms", "10ms"]
+        selected, ok = QInputDialog.getItem(
+            self,
+            "B_integrated window",
+            "Select time window:",
+            items,
+            0,
+            False,
+        )
+        if not ok:
+            return None
+        return str(selected).strip()
+
+    def _expand_b_integrated_metrics_by_windows(self, selected_metrics, all_measured_columns):
+        selected = [str(m).strip() for m in selected_metrics if str(m).strip()]
+        available = set(str(c).strip() for c in all_measured_columns if str(c).strip())
+
+        bases = [
+            m for m in selected
+            if m.startswith("B_integrated")
+            and "rmse%" not in m.lower()
+            and not re.search(r"_\d+(?:\.\d+)?ms$", m)
+        ]
+        if not bases:
+            return selected
+
+        windows = self._ask_b_integrated_window_selection()
+        if windows is None:
+            return None
+
+        expanded = []
+        seen = set()
+
+        for metric in selected:
+            if metric in ("Exp_fit",):
+                if metric not in seen:
+                    expanded.append(metric)
+                    seen.add(metric)
+                continue
+
+            is_b_integrated_base = (
+                metric.startswith("B_integrated")
+                and "rmse%" not in metric.lower()
+                and not re.search(r"_\d+(?:\.\d+)?ms$", metric)
+            )
+
+            if not is_b_integrated_base:
+                if metric not in seen:
+                    expanded.append(metric)
+                    seen.add(metric)
+                continue
+
+            added_any = False
+            for w in windows:
+                candidate = metric if w == "All" else f"{metric}_{w}"
+                if candidate in available and candidate not in seen:
+                    expanded.append(candidate)
+                    seen.add(candidate)
+                    added_any = True
+
+            if (not added_any) and metric in available and metric not in seen:
+                expanded.append(metric)
+                seen.add(metric)
+
+        return expanded
+
+    def _with_rmse_companions(self, selected_metrics, all_measured_columns):
+        """Append available <metric>_RMSE% columns for selected metrics.
+
+        RMSE columns are hidden from selection UIs but included automatically
+        in extracted tables when their paired metric is selected.
+        """
+        selected = [str(m).strip() for m in selected_metrics if str(m).strip()]
+        available = set(str(c).strip() for c in all_measured_columns if str(c).strip())
+        out = []
+        seen = set()
+
+        for metric in selected:
+            if metric not in seen:
+                out.append(metric)
+                seen.add(metric)
+
+            if "rmse%" in metric.lower():
+                continue
+
+            companion = f"{metric}_RMSE%"
+            if companion in available and companion not in seen:
+                out.append(companion)
+                seen.add(companion)
+
+        return out
 
     def update_setup_dropdown_case2(self):
         case2 = next((c for c in self.additional_cases if c['index'] == 2), None)
@@ -2283,6 +2237,22 @@ class EddyCurrentGUI(QWidget):
         setup = self.setup_combo.currentText()
         gradient = self.compare_grad_combo.currentText()
         measured_column = self.compare_meas_combo.currentText()
+
+        if measured_column == "Exp_fit":
+            QMessageBox.information(
+                self,
+                "Exp_fit",
+                "Exp_fit from Metrics dropdown is not available in Plot yet. Use 'Extract single-value metrics' for Exp_fit tables.",
+            )
+            return
+
+        is_b_integrated_windowed = bool(re.search(r"_\d+(?:\.\d+)?ms$", measured_column))
+        if measured_column.startswith("B_integrated") and not is_b_integrated_windowed:
+            selected_window = self._ask_single_b_integrated_window()
+            if selected_window is None:
+                return
+            measured_column = measured_column if selected_window == "All" else f"{measured_column}_{selected_window}"
+
         selected_plot_type = self.compare_plot_combo.currentText()
         compare_with_sim = bool(self.compare_with_sim_checkbox.isChecked())
         sim_histogram_mode = self.compare_sim_hist_mode_combo.currentText() if compare_with_sim else "Beddy_average_FOV (uT)"
@@ -2650,6 +2620,517 @@ class EddyCurrentGUI(QWidget):
                 frames.append((grad_token, metric, pd.DataFrame(rows)))
 
         return frames
+
+    def _load_mat_curve_metrics_module(self):
+        module = getattr(self, "_mat_curve_metrics_module", None)
+        if module is not None:
+            return module
+
+        module_path = os.path.join(CURRENT_DIR, "Metrics", "mat_curve_metrics.py")
+        if not os.path.exists(module_path):
+            raise FileNotFoundError(f"Metrics helper not found: {module_path}")
+
+        spec = importlib.util.spec_from_file_location("mat_curve_metrics", module_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("Unable to load Metrics/mat_curve_metrics.py")
+
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self._mat_curve_metrics_module = module
+        return module
+
+    def _ask_metric_selection(self, measured_columns):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Select metrics")
+        layout = QVBoxLayout(dlg)
+
+        layout.addWidget(QLabel("Choose metrics to extract:"))
+        checks = []
+        for name in self._build_metric_options(measured_columns):
+            cb = QCheckBox(name)
+            cb.setChecked(False)
+            checks.append((name, cb))
+            layout.addWidget(cb)
+
+        btn_row = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        cancel_btn = QPushButton("Cancel")
+        btn_row.addWidget(ok_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+        ok_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+
+        if dlg.exec_() != QDialog.Accepted:
+            return None
+
+        selected = [name for name, cb in checks if cb.isChecked()]
+        return selected
+
+    def _ask_b_integrated_options(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("B_integrated options")
+        layout = QVBoxLayout(dlg)
+
+        layout.addWidget(QLabel("Mask times (ms, comma-separated):"))
+        mask_input = QLineEdit()
+        mask_input.setPlaceholderText("Example: 1, 3, 5, 10")
+        mask_input.setText("1, 3, 5, 10")
+        layout.addWidget(mask_input)
+
+        include_default_masks = QCheckBox("Include default masks (1, 3, 5, 10 ms)")
+        include_default_masks.setChecked(True)
+        layout.addWidget(include_default_masks)
+
+        curve_combo = QComboBox()
+        curve_combo.addItems(["Raw (trapz)", "Fitted", "Prefiltered", "Exponential"])
+        layout.addWidget(QLabel("Integrated curve"))
+        layout.addWidget(curve_combo)
+
+        pf_cutoff = QDoubleSpinBox()
+        pf_cutoff.setDecimals(3)
+        pf_cutoff.setRange(0.01, 0.49)
+        pf_cutoff.setSingleStep(0.01)
+        pf_cutoff.setValue(0.08)
+        pf_order = QSpinBox()
+        pf_order.setRange(1, 12)
+        pf_order.setValue(4)
+        layout.addWidget(QLabel("Prefilter cutoff (Wn)"))
+        layout.addWidget(pf_cutoff)
+        layout.addWidget(QLabel("Prefilter order"))
+        layout.addWidget(pf_order)
+
+        exp_order = QSpinBox()
+        exp_order.setRange(1, 8)
+        exp_order.setValue(2)
+        layout.addWidget(QLabel("Exponential fit order"))
+        layout.addWidget(exp_order)
+
+        def _update_fields():
+            src = curve_combo.currentText()
+            use_pf = (src == "Prefiltered")
+            use_exp = (src == "Exponential")
+            pf_cutoff.setEnabled(use_pf)
+            pf_order.setEnabled(use_pf)
+            exp_order.setEnabled(use_exp)
+
+        curve_combo.currentIndexChanged.connect(_update_fields)
+        _update_fields()
+
+        btn_row = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        cancel_btn = QPushButton("Cancel")
+        btn_row.addWidget(ok_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+        ok_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+
+        if dlg.exec_() != QDialog.Accepted:
+            return None
+
+        masks = []
+        if include_default_masks.isChecked():
+            masks.extend([1.0, 3.0, 5.0, 10.0])
+
+        raw_text = mask_input.text().strip()
+        if raw_text:
+            for chunk in raw_text.split(','):
+                token = chunk.strip().lower().replace("ms", "")
+                if not token:
+                    continue
+                try:
+                    masks.append(float(token))
+                except Exception:
+                    pass
+
+        # Keep order while removing duplicates.
+        deduped = []
+        seen = set()
+        for m in masks:
+            key = round(float(m), 8)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(float(m))
+        masks = deduped if deduped else [1.0, 3.0, 5.0, 10.0]
+
+        curve_map = {
+            "Raw (trapz)": "raw",
+            "Fitted": "fitted",
+            "Prefiltered": "prefiltered",
+            "Exponential": "exponential fit",
+        }
+        selected_curve = curve_map.get(curve_combo.currentText(), "raw")
+
+        return {
+            "masks": masks,
+            "method": "trapz",
+            "source": selected_curve,
+            "integrated_curve": curve_combo.currentText(),
+            "prefilter_cutoff": float(pf_cutoff.value()),
+            "prefilter_order": int(pf_order.value()),
+            "exp_order": int(exp_order.value()),
+        }
+
+    def _ask_exp_fit_options(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Exp_fit options")
+        layout = QVBoxLayout(dlg)
+
+        mode_combo = QComboBox()
+        mode_combo.addItems(["fixed order", "auto by RMSE% threshold"])
+        layout.addWidget(QLabel("Order mode"))
+        layout.addWidget(mode_combo)
+
+        fixed_order = QSpinBox()
+        fixed_order.setRange(1, 8)
+        fixed_order.setValue(2)
+        layout.addWidget(QLabel("Fixed order"))
+        layout.addWidget(fixed_order)
+
+        target_rmse = QDoubleSpinBox()
+        target_rmse.setRange(0.01, 100.0)
+        target_rmse.setDecimals(2)
+        target_rmse.setValue(5.0)
+        layout.addWidget(QLabel("Target RMSE%"))
+        layout.addWidget(target_rmse)
+
+        mask_combo = QComboBox()
+        mask_combo.addItems(["All", "1ms", "5ms", "10ms"])
+        layout.addWidget(QLabel("Integral window for fit value"))
+        layout.addWidget(mask_combo)
+
+        method_combo = QComboBox()
+        method_combo.addItems(["trapz", "simpson"])
+        layout.addWidget(QLabel("Integration method"))
+        layout.addWidget(method_combo)
+
+        def _update_mode():
+            is_fixed = (mode_combo.currentText() == "fixed order")
+            fixed_order.setEnabled(is_fixed)
+            target_rmse.setEnabled(not is_fixed)
+
+        mode_combo.currentIndexChanged.connect(_update_mode)
+        _update_mode()
+
+        btn_row = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        cancel_btn = QPushButton("Cancel")
+        btn_row.addWidget(ok_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+        ok_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+
+        if dlg.exec_() != QDialog.Accepted:
+            return None
+
+        return {
+            "mode": mode_combo.currentText(),
+            "fixed_order": int(fixed_order.value()),
+            "target_rmse_percent": float(target_rmse.value()),
+            "mask": mask_combo.currentText(),
+            "method": method_combo.currentText(),
+        }
+
+    def _table_gradient_axis(self, grad_token):
+        token = str(grad_token).upper().strip()
+        if token.startswith("G") and len(token) > 1:
+            return token[-1].lower()
+        return token[-1].lower() if token else ""
+
+    def _mask_to_time_ms(self, mask_name, x_rel):
+        if mask_name == "All":
+            if np.size(x_rel) == 0:
+                return 0.0
+            return float(x_rel[-1])
+        if isinstance(mask_name, (int, float, np.integer, np.floating)):
+            return float(mask_name)
+        if isinstance(mask_name, str):
+            s = mask_name.strip().lower().replace("ms", "")
+            if s == "all":
+                return float(x_rel[-1]) if np.size(x_rel) else 0.0
+            try:
+                return float(s)
+            except Exception:
+                pass
+        return float(x_rel[-1]) if np.size(x_rel) else 0.0
+
+    def _collect_case_mat_files(self, case, phantom_name):
+        folder_path = self._resolve_case_folder_path(case["base_path"], case["setup"], phantom_name)
+        if not os.path.isdir(folder_path):
+            return []
+        return [
+            os.path.join(folder_path, f)
+            for f in sorted(os.listdir(folder_path))
+            if f.lower().endswith(".mat") and not f.startswith("FID")
+        ]
+
+    def _compute_curve_metric_value(self, case, grad_token, phantom_name, mode, options):
+        mm = self._load_mat_curve_metrics_module()
+        grad_axis = self._table_gradient_axis(grad_token)
+        mat_files = self._collect_case_mat_files(case, phantom_name)
+        if not mat_files:
+            return np.nan, np.nan, ""
+
+        vals = []
+        rmses = []
+        params = []
+
+        for file_path in mat_files:
+            try:
+                Be, BeddyFitted, tiempo, nDelays, g_axis, deadTime, acqTime, fidsmap, nReadouts = sequenceAnalysis(file_path)
+                if str(g_axis).strip().lower() != grad_axis:
+                    continue
+
+                Be = np.asarray(Be, dtype=float)
+                BeddyFitted = np.asarray(BeddyFitted, dtype=float)
+                tiempo = np.asarray(tiempo, dtype=float)
+                nDelays = int(nDelays)
+                deadTime = float(deadTime)
+                acqTime = float(acqTime)
+
+                source_name = options.get("source", "raw")
+                if mode == "b_integrated":
+                    if source_name == "fitted":
+                        src_curve = BeddyFitted
+                    elif source_name == "prefiltered":
+                        data_for_pf = {
+                            "fidsmap": fidsmap,
+                            "nDelays": nDelays,
+                            "nReadouts": int(nReadouts),
+                            "deadTime": deadTime,
+                            "acqTime": acqTime,
+                        }
+                        src_curve = np.asarray(
+                            mm.compute_prefilter_curve(
+                                data_for_pf,
+                                int(options.get("prefilter_order", 4)),
+                                float(options.get("prefilter_cutoff", 0.08)),
+                            ),
+                            dtype=float,
+                        )
+                    elif source_name == "exponential fit":
+                        recon_raw = mm.reconstruct_continuous_series(Be, tiempo, deadTime, acqTime)
+                        fit_res = mm.fit_exponentials_orders(
+                            recon_raw["x_rel"],
+                            recon_raw["y"],
+                            [int(options.get("exp_order", 2))],
+                        )
+                        fit_ok = [f for f in fit_res.get("fits", []) if f.get("success")]
+                        if not fit_ok:
+                            continue
+                        chosen = fit_ok[0]
+                        t_end = self._mask_to_time_ms(options.get("mask", "All"), recon_raw["x_rel"])
+                        val = float(mm.integrate_until_time(
+                            np.asarray(chosen["x"], dtype=float),
+                            np.asarray(chosen["y_fit"], dtype=float),
+                            t_end,
+                            options.get("method", "trapz"),
+                        ))
+                        rmse_pct = chosen.get("rmse_percent", np.nan)
+                        vals.append(val)
+                        rmses.append(float(rmse_pct) if np.isfinite(rmse_pct) else np.nan)
+                        coeffs = chosen.get("coefficients", {})
+                        params.append(", ".join([f"{k}={v:.4g}" for k, v in coeffs.items()]))
+                        continue
+                    else:
+                        src_curve = Be
+
+                    mask_opt = options.get("mask", "All")
+                    windows = []
+                    if mask_opt != "All":
+                        try:
+                            windows = [float(mask_opt)]
+                        except Exception:
+                            windows = []
+                    integ = mm.compute_integral_metrics_reconstructed(
+                        src_curve,
+                        tiempo,
+                        deadTime,
+                        acqTime,
+                        windows,
+                        options.get("method", "trapz"),
+                    )
+                    if mask_opt == "All":
+                        val = float(integ.get("all_cumulative", np.nan))
+                    else:
+                        key = float(mask_opt)
+                        val = float(integ.get("masked_cumulative", {}).get(key, np.nan))
+
+                    recon_ref = mm.reconstruct_continuous_series(Be, tiempo, deadTime, acqTime)
+                    recon_cmp = mm.reconstruct_continuous_series(src_curve, tiempo, deadTime, acqTime)
+                    t_end = self._mask_to_time_ms(mask_opt, recon_ref["x_rel"])
+                    rmse = mm.rmse_until_time(
+                        np.asarray(recon_ref["x_rel"], dtype=float),
+                        np.asarray(recon_ref["y"], dtype=float),
+                        np.asarray(recon_cmp["x_rel"], dtype=float),
+                        np.asarray(recon_cmp["y"], dtype=float),
+                        t_end,
+                    )
+                    y_ref = np.asarray(recon_ref["y"], dtype=float)
+                    if np.size(y_ref) > 0 and np.any(np.isfinite(y_ref)):
+                        p2p = float(np.nanmax(y_ref) - np.nanmin(y_ref))
+                    else:
+                        p2p = np.nan
+                    rmse_pct = float(100.0 * rmse / p2p) if np.isfinite(rmse) and np.isfinite(p2p) and p2p > 0 else np.nan
+                    vals.append(val)
+                    rmses.append(rmse_pct)
+                    params.append("")
+                else:
+                    recon_raw = mm.reconstruct_continuous_series(Be, tiempo, deadTime, acqTime)
+                    if options.get("mode") == "auto by RMSE% threshold":
+                        mm.TARGET_RMSE_PERCENT = float(options.get("target_rmse_percent", 5.0))
+                        fit_res = mm.fit_exponentials_orders(recon_raw["x_rel"], recon_raw["y"], list(range(1, 9)))
+                        target_order = fit_res.get("target_order", None)
+                        fit_ok = [f for f in fit_res.get("fits", []) if f.get("success")]
+                        if not fit_ok:
+                            continue
+                        if target_order is None:
+                            chosen = min(fit_ok, key=lambda d: d.get("order", 99))
+                        else:
+                            chosen = next((f for f in fit_ok if int(f.get("order", -1)) == int(target_order)), fit_ok[0])
+                    else:
+                        fit_res = mm.fit_exponentials_orders(
+                            recon_raw["x_rel"],
+                            recon_raw["y"],
+                            [int(options.get("fixed_order", 2))],
+                        )
+                        fit_ok = [f for f in fit_res.get("fits", []) if f.get("success")]
+                        if not fit_ok:
+                            continue
+                        chosen = fit_ok[0]
+
+                    t_end = self._mask_to_time_ms(options.get("mask", "All"), np.asarray(chosen["x"], dtype=float))
+                    val = float(mm.integrate_until_time(
+                        np.asarray(chosen["x"], dtype=float),
+                        np.asarray(chosen["y_fit"], dtype=float),
+                        t_end,
+                        options.get("method", "trapz"),
+                    ))
+                    vals.append(val)
+                    rmse_pct = chosen.get("rmse_percent", np.nan)
+                    rmses.append(float(rmse_pct) if np.isfinite(rmse_pct) else np.nan)
+                    coeffs = chosen.get("coefficients", {})
+                    params.append(", ".join([f"{k}={v:.4g}" for k, v in coeffs.items()]))
+            except Exception:
+                continue
+
+        if len(vals) == 0:
+            return np.nan, np.nan, ""
+
+        value = float(np.nanmean(np.asarray(vals, dtype=float)))
+        rmse_value = float(np.nanmean(np.asarray(rmses, dtype=float))) if len(rmses) else np.nan
+        params_text = params[-1] if params else ""
+        return value, rmse_value, params_text
+
+    def _build_curve_metric_frames(self, compare_cases, gradient, custom_labels, mode, options):
+        gradients_to_plot = self._single_value_gradient_list(gradient)
+        phantom_order = self._METRICS_PHANTOM_ORDER
+        frames = []
+
+        for grad_token in gradients_to_plot:
+            rows = {"Phantom_position": phantom_order}
+            for case_idx, case in enumerate(compare_cases):
+                case_label = self._case_display_name(case, case_idx, custom_labels)
+                values = []
+                rmses = []
+                params = []
+                for phantom_name in phantom_order:
+                    val, rmse_pct, param_txt = self._compute_curve_metric_value(
+                        case=case,
+                        grad_token=grad_token,
+                        phantom_name=phantom_name,
+                        mode=mode,
+                        options=options,
+                    )
+                    values.append(val)
+                    rmses.append(rmse_pct)
+                    params.append(param_txt)
+                rows[case_label] = values
+                rows[f"{case_label}_RMSE%"] = rmses
+                if mode == "exp_fit":
+                    rows[f"{case_label}_Params"] = params
+
+            metric_name = "B_integrated"
+            if mode == "b_integrated":
+                mask_value = options.get('mask', 'All')
+                if isinstance(mask_value, (int, float, np.integer, np.floating)):
+                    mask_tag = f"{float(mask_value):g}ms"
+                else:
+                    mask_tag = str(mask_value)
+                metric_name = f"B_integrated_{options.get('source', 'raw').replace(' ', '_')}_{mask_tag}_{options.get('method', 'trapz')}"
+            elif mode == "exp_fit":
+                if options.get("mode") == "fixed order":
+                    metric_name = f"Exp_fit_order_{options.get('fixed_order', 2)}_{options.get('mask', 'All')}"
+                else:
+                    metric_name = f"Exp_fit_auto_lt_{options.get('target_rmse_percent', 5.0):.2f}pct_{options.get('mask', 'All')}"
+
+            frames.append((grad_token, metric_name, pd.DataFrame(rows)))
+
+        return frames
+
+    def _frames_to_continuous_table(self, frames):
+        if not frames:
+            return pd.DataFrame()
+        all_columns = ["Gradient", "Metric", "Phantom_position"]
+        for _, _, df in frames:
+            for col in df.columns:
+                if col not in all_columns:
+                    all_columns.append(col)
+
+        blocks = []
+        for grad_token, metric_name, df in frames:
+            block = df.copy()
+            block.insert(0, "Metric", metric_name)
+            block.insert(0, "Gradient", grad_token)
+            for col in all_columns:
+                if col not in block.columns:
+                    block[col] = np.nan
+            blocks.append(block[all_columns])
+        return pd.concat(blocks, ignore_index=True)
+
+    def _show_single_value_metrics_dialog_continuous(self, continuous_df, title):
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.resize(1200, 780)
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel("Continuous table format for direct copy/paste to Excel."))
+
+        table = CopyableTableWidget()
+        table.setRowCount(continuous_df.shape[0])
+        table.setColumnCount(continuous_df.shape[1])
+        table.setHorizontalHeaderLabels([str(c) for c in continuous_df.columns])
+        table.verticalHeader().setVisible(False)
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+
+        for r in range(continuous_df.shape[0]):
+            for c in range(continuous_df.shape[1]):
+                value = continuous_df.iat[r, c]
+                if isinstance(value, (int, float, np.integer, np.floating)):
+                    text = "" if not np.isfinite(value) else f"{value:.6g}"
+                    align = Qt.AlignRight | Qt.AlignVCenter
+                else:
+                    text = "" if (isinstance(value, float) and np.isnan(value)) else str(value)
+                    align = Qt.AlignCenter if c <= 2 else Qt.AlignLeft | Qt.AlignVCenter
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(align)
+                table.setItem(r, c, item)
+
+        table.resizeColumnsToContents()
+        layout.addWidget(table)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn)
+
+        self.current_analysis_table_dialog = dlg
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+        dlg.show()
+        return dlg
 
     def _show_single_value_metrics_dialog(self, frames, title):
         """Display metric tables grouped by gradient, one sub-table per metric.
@@ -3660,6 +4141,18 @@ class EddyCurrentGUI(QWidget):
         if fig is None or not labels:
             return
 
+        def _split_suffix(text):
+            t = str(text or "").strip()
+            # Exponential fit labels may carry params after a separator.
+            if "_exp_fit" in t:
+                idx = t.find("_exp_fit")
+                base = t[:idx]
+                suffix = t[idx:]
+                return base, suffix
+            if t.endswith("_fitted"):
+                return t[:-7], "_fitted"
+            return t, ""
+
         for ax in fig.axes:
             legend = ax.get_legend()
             if legend is None:
@@ -3669,22 +4162,18 @@ class EddyCurrentGUI(QWidget):
             if not text_items:
                 continue
 
-            if len(labels) == 1:
-                for txt_obj in text_items:
-                    txt_obj.set_text(labels[0])
-                continue
-
             mapping = {}
             next_idx = 0
             for txt_obj in text_items:
                 current = txt_obj.get_text().strip()
-                if current not in mapping:
+                base, suffix = _split_suffix(current)
+                if base not in mapping:
                     if next_idx < len(labels):
-                        mapping[current] = labels[next_idx]
+                        mapping[base] = labels[next_idx]
                         next_idx += 1
                     else:
-                        mapping[current] = current
-                txt_obj.set_text(mapping[current])
+                        mapping[base] = base
+                txt_obj.set_text(f"{mapping[base]}{suffix}")
 
     def _maybe_customize_legends(self, fig):
         """Apply custom legend names from fixed text fields when enabled."""
@@ -4077,7 +4566,7 @@ class EddyCurrentGUI(QWidget):
         compare_with_sim = bool(self.compare_with_sim_checkbox.isChecked())
         custom_hist_labels = self._collect_case_custom_legends() if self.change_legend_checkbox.isChecked() else []
 
-        # Collect ALL available metric columns (not just the currently selected one)
+        # Collect all available measured-table columns.
         all_measured_columns = [
             self.compare_meas_combo.itemText(i)
             for i in range(self.compare_meas_combo.count())
@@ -4086,6 +4575,13 @@ class EddyCurrentGUI(QWidget):
         if not all_measured_columns:
             QMessageBox.warning(self, "Warning", "No measured columns available.")
             return
+
+        all_measured_columns_raw = [
+            str(c).strip() for c in getattr(self, "_compare_measured_raw_columns", [])
+            if str(c).strip()
+        ]
+        if not all_measured_columns_raw:
+            all_measured_columns_raw = list(all_measured_columns)
 
         try:
             active_extra_cases = []
@@ -4110,12 +4606,55 @@ class EddyCurrentGUI(QWidget):
             if self.add_case_enabled and len(active_extra_cases) > 0:
                 compare_cases.extend(active_extra_cases)
 
-            frames = self._build_single_value_metrics_frames(
-                compare_cases=compare_cases,
-                gradient=gradient,
-                measured_columns=all_measured_columns,
-                custom_labels=custom_hist_labels,
-            )
+            selected_metrics = self._ask_metric_selection(all_measured_columns)
+            if selected_metrics is None:
+                return
+
+            selected_metrics = [m for m in selected_metrics if str(m).strip()]
+            if not selected_metrics:
+                QMessageBox.warning(self, "Warning", "No metrics selected.")
+                return
+
+            selected_metrics = self._expand_b_integrated_metrics_by_windows(selected_metrics, all_measured_columns_raw)
+            if selected_metrics is None:
+                return
+
+            selected_metrics = self._with_rmse_companions(selected_metrics, all_measured_columns_raw)
+
+            frames = []
+
+            # Standard table-driven metrics.
+            std_metrics = [m for m in selected_metrics if m in all_measured_columns_raw and m != "Exp_fit"]
+            if std_metrics:
+                frames.extend(
+                    self._build_single_value_metrics_frames(
+                        compare_cases=compare_cases,
+                        gradient=gradient,
+                        measured_columns=std_metrics,
+                        custom_labels=custom_hist_labels,
+                    )
+                )
+
+            # Special Exp_fit workflow.
+            if "Exp_fit" in selected_metrics:
+                exp_options = self._ask_exp_fit_options()
+                if exp_options is None:
+                    return
+                frames.extend(
+                    self._build_curve_metric_frames(
+                        compare_cases=compare_cases,
+                        gradient=gradient,
+                        custom_labels=custom_hist_labels,
+                        mode="exp_fit",
+                        options=exp_options,
+                    )
+                )
+
+            if not frames:
+                QMessageBox.warning(self, "Warning", "No metrics could be generated.")
+                return
+
+            continuous_df = self._frames_to_continuous_table(frames)
 
             self.current_analysis_figure = None
             self.current_analysis_image_path = None
@@ -4126,9 +4665,9 @@ class EddyCurrentGUI(QWidget):
             )
             self.current_analysis_filename = self.current_analysis_table_filename
 
-            self._show_single_value_metrics_dialog(
-                frames,
-                title=f"Single-value metrics — G{gradient}",
+            self._show_single_value_metrics_dialog_continuous(
+                continuous_df,
+                title=f"Single-value metrics — G{gradient} (continuous)",
             )
         except FileNotFoundError as e:
             QMessageBox.critical(
@@ -4304,6 +4843,7 @@ class EddyCurrentGUI(QWidget):
                 legend_added = False
                 prefilter_label_added = False
                 firstpoint_label_added = False
+                fitted_label_added = False
                 case_label = f"G{g.upper()}_{case_setup}_{case_phantom}_{case_path_tail}"
 
                 for data in data_by_axis[g]:
@@ -4376,7 +4916,18 @@ class EddyCurrentGUI(QWidget):
                             )
                             firstpoint_label_added = True
 
-                        current_ax.plot(tiempo_corr, BeddyFitted[n, :], '-', color=color, alpha=0.8)
+                        if not fitted_label_added:
+                            current_ax.plot(
+                                tiempo_corr,
+                                BeddyFitted[n, :],
+                                '-',
+                                color=color,
+                                alpha=0.8,
+                                label=f"{case_label}_fitted",
+                            )
+                            fitted_label_added = True
+                        else:
+                            current_ax.plot(tiempo_corr, BeddyFitted[n, :], '-', color=color, alpha=0.8)
 
         if axes is not None:
             grad_names = ['GX', 'GY', 'GZ']
@@ -4523,6 +5074,7 @@ class EddyCurrentGUI(QWidget):
                     legend_added = False
                     prefilter_label_added = False
                     firstpoint_label_added = False
+                    fitted_label_added = False
                     case_label = f"G{g.upper()}_{case_setup}_{position}_{case_path_tail}"
 
                     for data in data_by_axis[g]:
@@ -4568,7 +5120,18 @@ class EddyCurrentGUI(QWidget):
                                             ha='center', fontsize=9, color=color, fontweight='bold')
                                 firstpoint_label_added = True
 
-                            ax.plot(tiempo_corr, BeddyFitted[n, :], '-', color=color, alpha=0.8)
+                            if not fitted_label_added:
+                                ax.plot(
+                                    tiempo_corr,
+                                    BeddyFitted[n, :],
+                                    '-',
+                                    color=color,
+                                    alpha=0.8,
+                                    label=f"{case_label}_fitted",
+                                )
+                                fitted_label_added = True
+                            else:
+                                ax.plot(tiempo_corr, BeddyFitted[n, :], '-', color=color, alpha=0.8)
 
             if gradient == "All":
                 for g in ['x', 'y', 'z']:
@@ -4606,6 +5169,469 @@ class EddyCurrentGUI(QWidget):
         plt.close(fig)
         return output_path
 
+    def _ask_time_domain_expfit_plot_options(self):
+        mode, ok = QInputDialog.getItem(
+            self,
+            "Exponential fit",
+            "Order mode:",
+            ["Fixed order", "Auto by RMSE%"],
+            0,
+            False,
+        )
+        if not ok:
+            return None
+
+        if mode == "Fixed order":
+            order, ok = QInputDialog.getInt(
+                self,
+                "Exponential fit",
+                "Fixed order:",
+                value=2,
+                min=1,
+                max=10,
+                step=1,
+            )
+            if not ok:
+                return None
+            return {"mode": "fixed", "order": int(order), "target": 5.0, "max_order": 8}
+
+        target, ok = QInputDialog.getDouble(
+            self,
+            "Exponential fit",
+            "Target RMSE%:",
+            value=5.0,
+            min=0.01,
+            max=100.0,
+            decimals=2,
+        )
+        if not ok:
+            return None
+        max_order, ok = QInputDialog.getInt(
+            self,
+            "Exponential fit",
+            "Max order for auto search:",
+            value=8,
+            min=1,
+            max=12,
+            step=1,
+        )
+        if not ok:
+            return None
+        return {"mode": "auto", "order": 2, "target": float(target), "max_order": int(max_order)}
+
+    def _run_beddy_exponential_fit_plot(
+        self,
+        cases,
+        gradient,
+        ndelay,
+        options,
+        colormap="Single-color gradient",
+        use_subplots=False,
+        save_dir=None,
+        save_plot=False,
+    ):
+        import matplotlib.pyplot as plt
+        import tempfile
+
+        mm = self._load_mat_curve_metrics_module()
+
+        base_colors = {
+            'x': 'midnightblue',
+            'y': 'darkred',
+            'z': 'darkgreen'
+        }
+
+        palette_colors = None
+        if colormap in ("Viridis", "Inferno") and len(cases) > 0:
+            import matplotlib.cm as cm
+            cmap = cm.get_cmap(colormap.lower())
+            upper = 0.70 if colormap == "Inferno" else 0.85
+            sample_range = np.linspace(0.0, upper, len(cases))
+            palette_colors = [cmap(pos) for pos in sample_range]
+
+        if gradient == "All":
+            grad_list = ['x', 'y', 'z']
+        else:
+            grad_list = [gradient[-1].lower()]
+
+        if ndelay == "All":
+            ndelay_selected = "all"
+        else:
+            ndelay_selected = int(ndelay)
+
+        if use_subplots and gradient == "All":
+            fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+            fig.subplots_adjust(wspace=0.35)
+            grad_to_axis = {'x': 0, 'y': 1, 'z': 2}
+        else:
+            fig = plt.figure(figsize=(10, 6))
+            axes = None
+            grad_to_axis = {'x': 0, 'y': 1, 'z': 2}
+
+        plotted_any = False
+
+        for case_idx, case in enumerate(cases):
+            case_path = case['base_path']
+            case_setup = case['setup']
+            case_phantom = case['phantom']
+            case_path_tail = os.path.basename(os.path.normpath(case_path))
+            folder_path = self._resolve_case_folder_path(case_path, case_setup, case_phantom)
+
+            if not os.path.isdir(folder_path):
+                continue
+
+            if palette_colors is not None:
+                color_by_axis = {g: palette_colors[case_idx] for g in ['x', 'y', 'z']}
+            else:
+                lighten_amount = -0.35 + (case_idx / max(1, len(cases) - 1)) * 0.85 if len(cases) > 1 else 0.0
+                color_by_axis = {g: self._lighten_color(base_colors[g], lighten_amount) for g in ['x', 'y', 'z']}
+
+            for fname in sorted(os.listdir(folder_path)):
+                if not fname.endswith(".mat") or fname.startswith("FID"):
+                    continue
+
+                file_path = os.path.join(folder_path, fname)
+                try:
+                    Be, _, tiempo, nDelays, g_axis, deadTime, acqTime, _, _ = sequenceAnalysis(file_path)
+                except Exception:
+                    continue
+
+                g = str(g_axis).strip().lower()
+                if g not in grad_list:
+                    continue
+
+                Be = np.asarray(Be, dtype=float)
+                tiempo = np.asarray(tiempo, dtype=float)
+                if Be.ndim != 2 or np.size(tiempo) == 0:
+                    continue
+
+                nDelays = int(nDelays)
+                if ndelay_selected == "all" or (isinstance(ndelay_selected, int) and ndelay_selected >= nDelays):
+                    delay_indices = list(range(nDelays))
+                else:
+                    delay_indices = [ndelay_selected]
+
+                x_parts = []
+                y_parts = []
+                for n in delay_indices:
+                    delay_offset = float(n) * float(deadTime + acqTime)
+                    x_seg = np.asarray(tiempo + delay_offset, dtype=float)
+                    y_seg = np.asarray(Be[n, :], dtype=float)
+                    finite = np.isfinite(x_seg) & np.isfinite(y_seg)
+                    if np.any(finite):
+                        x_parts.append(x_seg[finite])
+                        y_parts.append(y_seg[finite])
+
+                if not x_parts:
+                    continue
+
+                x = np.concatenate(x_parts)
+                y = np.concatenate(y_parts)
+                order_idx = np.argsort(x)
+                x = x[order_idx]
+                y = y[order_idx]
+                x = x - float(x[0])
+
+                if x.size < 3:
+                    continue
+
+                if options["mode"] == "fixed":
+                    fit_out = mm.fit_exponentials_orders(x, y, [int(options["order"])])
+                    fit_ok = [f for f in fit_out.get("fits", []) if f.get("success", False)]
+                    if not fit_ok:
+                        continue
+                    chosen = fit_ok[0]
+                else:
+                    mm.TARGET_RMSE_PERCENT = float(options["target"])
+                    fit_out = mm.fit_exponentials_orders(x, y, list(range(1, int(options["max_order"]) + 1)))
+                    fit_ok = [f for f in fit_out.get("fits", []) if f.get("success", False)]
+                    if not fit_ok:
+                        continue
+                    target_order = fit_out.get("target_order", None)
+                    if target_order is None:
+                        chosen = min(fit_ok, key=lambda d: float(d.get("rmse_percent", np.inf)))
+                    else:
+                        chosen = next((f for f in fit_ok if int(f.get("order", -1)) == int(target_order)), fit_ok[0])
+
+                if axes is not None:
+                    ax = axes[grad_to_axis[g]]
+                else:
+                    ax = plt.gca()
+
+                plotted_any = True
+                case_label = f"G{g.upper()}_{case_setup}_{case_phantom}_{case_path_tail}_{os.path.splitext(fname)[0]}"
+
+                ax.plot(
+                    x,
+                    y,
+                    'o',
+                    markersize=3.5,
+                    color=color_by_axis[g],
+                    alpha=0.7,
+                    label=case_label,
+                )
+
+                coeffs = chosen.get("coefficients", {})
+                param_parts = []
+                for k in sorted(coeffs.keys()):
+                    v = coeffs[k]
+                    if isinstance(v, (int, float, np.integer, np.floating)) and np.isfinite(v):
+                        param_parts.append(f"{k}={float(v):.4g}")
+                param_text = ", ".join(param_parts)
+                exp_label = f"{case_label}_exp_fit"
+                if param_text:
+                    exp_label = f"{exp_label} ({param_text})"
+
+                ax.plot(
+                    np.asarray(chosen["x"], dtype=float),
+                    np.asarray(chosen["y_fit"], dtype=float),
+                    '-',
+                    linewidth=2.0,
+                    color=color_by_axis[g],
+                    alpha=0.95,
+                    label=exp_label,
+                )
+
+        if not plotted_any:
+            plt.close(fig)
+            raise ValueError("No valid .mat data found for the selected setup/phantom/gradient selection.")
+
+        if axes is not None:
+            grad_names = {'x': 'GX', 'y': 'GY', 'z': 'GZ'}
+            for g in ['x', 'y', 'z']:
+                ax = axes[grad_to_axis[g]]
+                ax.legend(fontsize=8, loc='best')
+                ax.set_title(f"Beddy Exponential fit - {grad_names[g]}", fontsize=13)
+                ax.set_xlabel("Time (ms)", fontsize=11)
+                ax.set_ylabel("Beddy (uT)", fontsize=11)
+                ax.grid(True, alpha=0.35)
+            fig.tight_layout()
+        else:
+            plt.legend(fontsize=8, loc='best')
+            plt.title(f"Beddy Exponential fit - {gradient}", fontsize=13)
+            plt.xlabel("Time (ms)", fontsize=11)
+            plt.ylabel("Beddy (uT)", fontsize=11)
+            plt.grid(True, alpha=0.35)
+            plt.tight_layout()
+
+        setups_joined = "_".join([c['setup'] for c in cases])
+        subplot_tag = "_subplots" if axes is not None else ""
+        filename = f"Beddy_expfit{subplot_tag}_Grad_{gradient}_nDelay_{ndelay}_{setups_joined}.png"
+
+        if save_plot and save_dir and os.path.isdir(save_dir):
+            output_path = os.path.join(save_dir, filename)
+        else:
+            output_path = os.path.join(tempfile.gettempdir(), filename)
+
+        self._maybe_compact_dimensions(fig)
+        self._maybe_customize_legends(fig)
+        self._maybe_customize_fonts(fig)
+        fig.savefig(output_path, dpi=250, bbox_inches='tight')
+        plt.close(fig)
+        return output_path, filename.replace(".png", "")
+
+    def _run_beddy_exponential_fit_plot_all_phantoms(
+        self,
+        cases,
+        gradient,
+        ndelay,
+        options,
+        colormap="Single-color gradient",
+        save_dir=None,
+        save_plot=False,
+    ):
+        import matplotlib.pyplot as plt
+        import tempfile
+
+        mm = self._load_mat_curve_metrics_module()
+        positions = ["Center", "+X", "-X", "+Y", "-Y", "+Z", "-Z"]
+        base_colors = {'x': 'midnightblue', 'y': 'darkred', 'z': 'darkgreen'}
+
+        palette_colors = None
+        if colormap in ("Viridis", "Inferno") and len(cases) > 0:
+            import matplotlib.cm as cm
+            cmap = cm.get_cmap(colormap.lower())
+            upper = 0.70 if colormap == "Inferno" else 0.85
+            sample_range = np.linspace(0.0, upper, len(cases))
+            palette_colors = [cmap(pos) for pos in sample_range]
+
+        if gradient == "All":
+            grad_list = ['x', 'y', 'z']
+            fig, axes = plt.subplots(len(positions), 3, figsize=(18, 3 * len(positions)), squeeze=False)
+            grad_to_col = {'x': 0, 'y': 1, 'z': 2}
+        else:
+            grad_list = [gradient[-1].lower()]
+            fig, axes = plt.subplots(len(positions), 1, figsize=(10, 3 * len(positions)), squeeze=False)
+            grad_to_col = {'x': 0, 'y': 0, 'z': 0}
+
+        if ndelay == "All":
+            ndelay_selected = "all"
+        else:
+            ndelay_selected = int(ndelay)
+
+        plotted_any = False
+
+        for pos_idx, position in enumerate(positions):
+            per_grad_plotted = {'x': False, 'y': False, 'z': False}
+
+            for case_idx, case in enumerate(cases):
+                case_path = case['base_path']
+                case_setup = case['setup']
+                case_path_tail = os.path.basename(os.path.normpath(case_path))
+                folder_path = self._resolve_case_folder_path(case_path, case_setup, position)
+                if not os.path.isdir(folder_path):
+                    continue
+
+                color_by_axis = {}
+                if palette_colors is not None:
+                    for g in ['x', 'y', 'z']:
+                        color_by_axis[g] = palette_colors[case_idx]
+                else:
+                    lighten_amount = -0.35 + (case_idx / max(1, len(cases) - 1)) * 0.85 if len(cases) > 1 else 0.0
+                    for g in ['x', 'y', 'z']:
+                        color_by_axis[g] = self._lighten_color(base_colors[g], lighten_amount)
+
+                for fname in sorted(os.listdir(folder_path)):
+                    if not fname.endswith('.mat') or fname.startswith('FID'):
+                        continue
+
+                    file_path = os.path.join(folder_path, fname)
+                    try:
+                        Be, _, tiempo, nDelays, g_axis, deadTime, acqTime, _, _ = sequenceAnalysis(file_path)
+                    except Exception:
+                        continue
+
+                    g = str(g_axis).strip().lower()
+                    if g not in grad_list:
+                        continue
+
+                    Be = np.asarray(Be, dtype=float)
+                    tiempo = np.asarray(tiempo, dtype=float)
+                    if Be.ndim != 2 or np.size(tiempo) == 0:
+                        continue
+
+                    nDelays = int(nDelays)
+                    if ndelay_selected == "all" or (isinstance(ndelay_selected, int) and ndelay_selected >= nDelays):
+                        delay_indices = list(range(nDelays))
+                    else:
+                        delay_indices = [ndelay_selected]
+
+                    x_parts = []
+                    y_parts = []
+                    for n in delay_indices:
+                        delay_offset = float(n) * float(deadTime + acqTime)
+                        x_seg = np.asarray(tiempo + delay_offset, dtype=float)
+                        y_seg = np.asarray(Be[n, :], dtype=float)
+                        finite = np.isfinite(x_seg) & np.isfinite(y_seg)
+                        if np.any(finite):
+                            x_parts.append(x_seg[finite])
+                            y_parts.append(y_seg[finite])
+
+                    if not x_parts:
+                        continue
+
+                    x = np.concatenate(x_parts)
+                    y = np.concatenate(y_parts)
+                    idx = np.argsort(x)
+                    x = x[idx]
+                    y = y[idx]
+                    x = x - float(x[0])
+                    if x.size < 3:
+                        continue
+
+                    if options['mode'] == 'fixed':
+                        fit_out = mm.fit_exponentials_orders(x, y, [int(options['order'])])
+                        fit_ok = [f for f in fit_out.get('fits', []) if f.get('success', False)]
+                        if not fit_ok:
+                            continue
+                        chosen = fit_ok[0]
+                    else:
+                        mm.TARGET_RMSE_PERCENT = float(options['target'])
+                        fit_out = mm.fit_exponentials_orders(x, y, list(range(1, int(options['max_order']) + 1)))
+                        fit_ok = [f for f in fit_out.get('fits', []) if f.get('success', False)]
+                        if not fit_ok:
+                            continue
+                        target_order = fit_out.get('target_order', None)
+                        if target_order is None:
+                            chosen = min(fit_ok, key=lambda d: float(d.get('rmse_percent', np.inf)))
+                        else:
+                            chosen = next((f for f in fit_ok if int(f.get('order', -1)) == int(target_order)), fit_ok[0])
+
+                    ax = axes[pos_idx, grad_to_col[g]]
+                    per_grad_plotted[g] = True
+                    plotted_any = True
+
+                    case_label = f"G{g.upper()}_{case_setup}_{position}_{case_path_tail}_{os.path.splitext(fname)[0]}"
+
+                    ax.plot(
+                        x,
+                        y,
+                        'o',
+                        markersize=3.5,
+                        color=color_by_axis[g],
+                        alpha=0.7,
+                        label=case_label,
+                    )
+
+                    coeffs = chosen.get('coefficients', {})
+                    param_parts = []
+                    for k in sorted(coeffs.keys()):
+                        v = coeffs[k]
+                        if isinstance(v, (int, float, np.integer, np.floating)) and np.isfinite(v):
+                            param_parts.append(f"{k}={float(v):.4g}")
+                    param_text = ", ".join(param_parts)
+                    exp_label = f"{case_label}_exp_fit"
+                    if param_text:
+                        exp_label = f"{exp_label} ({param_text})"
+
+                    ax.plot(
+                        np.asarray(chosen['x'], dtype=float),
+                        np.asarray(chosen['y_fit'], dtype=float),
+                        '-',
+                        linewidth=2.0,
+                        color=color_by_axis[g],
+                        alpha=0.95,
+                        label=exp_label,
+                    )
+
+            if gradient == 'All':
+                for g in ['x', 'y', 'z']:
+                    axg = axes[pos_idx, grad_to_col[g]]
+                    axg.set_title(f"{position} - G{g.upper()}", fontsize=10)
+                    axg.set_xlabel('Time (ms)', fontsize=9)
+                    axg.set_ylabel('Beddy (uT)', fontsize=9)
+                    axg.grid(True, alpha=0.35)
+                    if per_grad_plotted[g]:
+                        axg.legend(fontsize=7, loc='best')
+            else:
+                ax = axes[pos_idx, 0]
+                ax.set_title(f"{position}", fontsize=11)
+                ax.set_xlabel('Time (ms)', fontsize=10)
+                ax.set_ylabel('Beddy (uT)', fontsize=10)
+                ax.grid(True, alpha=0.35)
+                if any(per_grad_plotted.values()):
+                    ax.legend(fontsize=8, loc='best')
+
+        if not plotted_any:
+            plt.close(fig)
+            raise ValueError('No valid .mat data found for exponential fit in the selected All-phantoms view.')
+
+        fig.tight_layout()
+        setups_joined = "_".join([c['setup'] for c in cases])
+        filename = f"Beddy_expfit_AllPhantoms_Grad_{gradient}_nDelay_{ndelay}_{setups_joined}.png"
+
+        if save_plot and save_dir and os.path.isdir(save_dir):
+            output_path = os.path.join(save_dir, filename)
+        else:
+            output_path = os.path.join(tempfile.gettempdir(), filename)
+
+        self._maybe_compact_dimensions(fig)
+        self._maybe_customize_legends(fig)
+        self._maybe_customize_fonts(fig)
+        fig.savefig(output_path, dpi=250, bbox_inches='tight')
+        plt.close(fig)
+        return output_path, filename.replace('.png', '')
+
     def run_analysis(self):
 
         print(">>> ANALYZE BUTTON CLICKED")
@@ -4628,6 +5654,7 @@ class EddyCurrentGUI(QWidget):
         gradient = self.gradient_combo.currentText()
         ndelay = self.ndelay_combo.currentText()
         apply_filter = self.filter_checkbox.isChecked()
+        use_exp_fit_plot = bool(getattr(self, "exp_fit_checkbox", None) and self.exp_fit_checkbox.isChecked())
         cutoff_text = self.beprefilter_cutoff_combo.currentText()
         order_text = self.beprefilter_order_combo.currentText()
         try:
@@ -4660,6 +5687,60 @@ class EddyCurrentGUI(QWidget):
                         })
 
                 use_add_case = len(active_extra_cases) > 0
+
+                if use_exp_fit_plot:
+                    exp_options = self._ask_time_domain_expfit_plot_options()
+                    if exp_options is None:
+                        return
+
+                    primary_phantom = forced_phantom_value if forced_single_phantom else main_case_phantom
+                    if use_add_case:
+                        cases = [{'base_path': base_path, 'setup': setup, 'phantom': primary_phantom}] + active_extra_cases
+                        colormap_choice, ok = QInputDialog.getItem(
+                            self,
+                            "Select colormap",
+                            "Colormap:",
+                            ["Single-color gradient", "Viridis", "Inferno"],
+                            0,
+                            False
+                        )
+                        if not ok:
+                            return
+                    else:
+                        cases = [{'base_path': base_path, 'setup': setup, 'phantom': primary_phantom}]
+                        colormap_choice = "Single-color gradient"
+
+                    use_subplots = bool(gradient == "All")
+                    if forced_all_phantoms:
+                        img_path, out_name = self._run_beddy_exponential_fit_plot_all_phantoms(
+                            cases=cases,
+                            gradient=gradient,
+                            ndelay=ndelay,
+                            options=exp_options,
+                            colormap=colormap_choice,
+                            save_dir=self.comparison_save_dir,
+                            save_plot=False,
+                        )
+                    else:
+                        img_path, out_name = self._run_beddy_exponential_fit_plot(
+                            cases=cases,
+                            gradient=gradient,
+                            ndelay=ndelay,
+                            options=exp_options,
+                            colormap=colormap_choice,
+                            use_subplots=use_subplots,
+                            save_dir=self.comparison_save_dir,
+                            save_plot=False,
+                        )
+
+                    if img_path and os.path.exists(img_path):
+                        pix = QPixmap(img_path)
+                        self.image_label.setPixmap(pix)
+                        self.current_analysis_figure = None
+                        self.current_analysis_image_path = img_path
+                        self.current_analysis_filename = out_name
+                        self._refresh_compare_measured_columns()
+                    return
 
                 if use_add_case:
                     primary_phantom = forced_phantom_value if forced_single_phantom else main_case_phantom

@@ -24,6 +24,7 @@ def update_t0_table(
     B_integrated_1ms_values=None,
     B_integrated_5ms_values=None,
     B_integrated_10ms_values=None,
+    extra_metrics=None,
 ):
 
     expected_columns = [
@@ -62,6 +63,17 @@ def update_t0_table(
         text = str(name).strip()
         return text.split("_")[0] if "_" in text else text
 
+    def _to_scalar(value):
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple, np.ndarray)):
+            return _safe_mean(value)
+        try:
+            val = float(value)
+        except Exception:
+            return None
+        return val if np.isfinite(val) else None
+
     save_path = os.path.join(base_path, setup)
     os.makedirs(save_path, exist_ok=True)
 
@@ -94,6 +106,15 @@ def update_t0_table(
         "B_integrated_5ms": mean_integrated_5ms,
         "B_integrated_10ms": mean_integrated_10ms,
     }
+
+    extra_metrics = extra_metrics or {}
+    extra_scalars = {}
+    for key, value in extra_metrics.items():
+        key_text = str(key).strip()
+        if not key_text or key_text in new_row:
+            continue
+        extra_scalars[key_text] = _to_scalar(value)
+        new_row[key_text] = extra_scalars[key_text]
 
     if os.path.exists(table_file):
         df = pd.read_csv(table_file, sep="\t")
@@ -133,6 +154,11 @@ def update_t0_table(
         df["B_integrated_10ms"] = np.nan
     df["B_integrated_10ms"] = pd.to_numeric(df["B_integrated_10ms"], errors="coerce")
 
+    for col in extra_scalars:
+        if col not in df.columns:
+            df[col] = np.nan
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
     if "Grad" not in df.columns:
         df["Grad"] = ""
     if "Phantom_position" not in df.columns:
@@ -159,6 +185,9 @@ def update_t0_table(
             df.loc[mask, "B_integrated_5ms"] = mean_integrated_5ms
         if mean_integrated_10ms is not None:
             df.loc[mask, "B_integrated_10ms"] = mean_integrated_10ms
+        for col, val in extra_scalars.items():
+            if val is not None:
+                df.loc[mask, col] = val
     else:
         df = pd.concat([df, pd.DataFrame([new_row])],
                        ignore_index=True)
@@ -183,6 +212,35 @@ def update_t0_table(
     for col in expected_columns:
         if col not in df.columns:
             df[col] = np.nan
-    df = df.reindex(columns=expected_columns)
+
+    preferred_extra = []
+    window_tags = ["", "_1ms", "_3ms", "_5ms", "_10ms"]
+    for base in [
+        "B_integrated",
+        "B_integrated_fitted",
+        "B_integrated_prefiltered",
+        "B_integrated_exp_fit1",
+        "B_integrated_exp_fit2",
+    ]:
+        for suffix in window_tags:
+            metric_col = f"{base}{suffix}"
+            rmse_col = f"{metric_col}_RMSE%"
+            preferred_extra.append(metric_col)
+            preferred_extra.append(rmse_col)
+
+    preferred_extra.extend([
+        "exp_fit1_A1",
+        "exp_fit1_tau1",
+        "exp_fit2_A1",
+        "exp_fit2_tau1",
+        "exp_fit2_A2",
+        "exp_fit2_tau2",
+    ])
+
+    existing_extra = [c for c in df.columns if c not in expected_columns]
+    ordered_extra = [c for c in preferred_extra if c in existing_extra]
+    ordered_extra.extend(sorted([c for c in existing_extra if c not in ordered_extra]))
+
+    df = df.reindex(columns=expected_columns + ordered_extra)
 
     df.to_csv(table_file, sep="\t", index=False)

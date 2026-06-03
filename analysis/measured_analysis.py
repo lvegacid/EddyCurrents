@@ -9,6 +9,7 @@ Created on Mon Mar  2 18:04:34 2026
 
 import os
 import csv
+import importlib.util
 import numpy as np
 
 # use Agg backend for all plotting; the GUI will handle image display
@@ -26,6 +27,59 @@ COLORS = {
     'y': 'firebrick',
     'z': 'green'
 }
+
+
+_CURVE_METRICS_HELPERS = None
+
+
+def _load_curve_metrics_helpers():
+    global _CURVE_METRICS_HELPERS
+    if _CURVE_METRICS_HELPERS is not None:
+        return _CURVE_METRICS_HELPERS
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    module_path = os.path.join(os.path.dirname(here), "Metrics", "mat_curve_metrics.py")
+    if not os.path.exists(module_path):
+        raise FileNotFoundError(f"Metrics helper module not found: {module_path}")
+
+    spec = importlib.util.spec_from_file_location("mat_curve_metrics_analysis", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load metrics helper module from {module_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _CURVE_METRICS_HELPERS = module
+    return module
+
+
+def _peak_to_peak_until_time(x, y, t_end):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    finite = np.isfinite(x) & np.isfinite(y)
+    x = x[finite]
+    y = y[finite]
+    if x.size < 2:
+        return np.nan
+
+    t_end = float(t_end)
+    mask = x <= t_end
+    x_cut = x[mask]
+    y_cut = y[mask]
+    if x_cut.size >= 1 and float(x_cut[-1]) < t_end <= float(x[-1]):
+        y_edge = float(np.interp(t_end, x, y))
+        y_cut = np.append(y_cut, y_edge)
+
+    if y_cut.size == 0:
+        return np.nan
+    return float(np.nanmax(y_cut) - np.nanmin(y_cut))
+
+
+def _rmse_percent_until_time(mm, x_ref, y_ref, x_cmp, y_cmp, t_end):
+    rmse = mm.rmse_until_time(x_ref, y_ref, x_cmp, y_cmp, float(t_end))
+    p2p = _peak_to_peak_until_time(x_ref, y_ref, float(t_end))
+    if np.isfinite(rmse) and np.isfinite(p2p) and p2p > 0:
+        return float(100.0 * rmse / p2p)
+    return np.nan
 
 
 def _resolve_measurement_folder(base_path, setup, phantom_position):
@@ -72,6 +126,9 @@ def run_measured_analysis(
     beprefilter_order=4,
     save_plot=True
 ):
+
+    mm = _load_curve_metrics_helpers()
+    metric_windows_ms = [1.0, 3.0, 5.0, 10.0]
 
     data_by_axis = {'x': [], 'y': [], 'z': []}
 
@@ -169,8 +226,14 @@ def run_measured_analysis(
         B0_prefilter_all = []
         B_integrated_all = []
         B_integrated_1ms_all = []
+        B_integrated_3ms_all = []
         B_integrated_5ms_all = []
         B_integrated_10ms_all = []
+        metric_acc = {}
+
+        def _acc_metric(name, value):
+            metric_acc.setdefault(name, []).append(value)
+
         prefilter_text_added = False
         # ensure legend entry is added only once per gradient
         legend_added = False
@@ -195,60 +258,102 @@ def run_measured_analysis(
                 valid_idx_table = np.where(np.isfinite(row_pref))[0]
                 if valid_idx_table.size > 0:
                     B0_prefilter_all.append(float(row_pref[int(valid_idx_table[0])]))
-            
-            # Calculate integrated value (trapz rule) across all delays
-            integrals = []
-            integrals_1ms = []
-            integrals_5ms = []
-            integrals_10ms = []
-            # Use relative time so 1/5/10 ms windows are measured from acquisition start,
-            # not from absolute timestamps that may include deadTime offsets.
-            t_axis = np.asarray(tiempo, dtype=float)
-            finite_t = np.isfinite(t_axis)
-            if np.any(finite_t):
-                t_rel = t_axis - float(np.nanmin(t_axis[finite_t]))
-                t_span = float(np.nanmax(t_rel[finite_t]))
-            else:
-                t_rel = t_axis
-                t_span = 0.0
 
-            # Heuristic: short spans are likely in seconds; otherwise milliseconds.
-            if t_span <= 0.2:
-                t1_limit = 1e-3
-                t5_limit = 5e-3
-                t10_limit = 10e-3
-            else:
-                t1_limit = 1.0
-                t5_limit = 5.0
-                t10_limit = 10.0
-            for n in range(nDelays):
-                # Integrate absolute Beddy so positive and negative lobes do not cancel out.
-                row_abs = np.abs(Beddy[n, :])
-                finite_row = finite_t & np.isfinite(row_abs)
-                if np.sum(finite_row) >= 2:
-                    integral_n = np.trapz(row_abs[finite_row], t_rel[finite_row])
-                    integrals.append(integral_n)
+            # Expanded metric family using the standalone reconstruction logic.
+            tiempo_arr = np.asarray(tiempo, dtype=float)
+            dead_time = float(deadTime)
+            acq_time = float(acqTime)
+            recon_ref = mm.reconstruct_continuous_series(
+                np.asarray(Beddy, dtype=float),
+                tiempo_arr,
+                dead_time,
+                acq_time,
+            )
+            x_ref = np.asarray(recon_ref["x_rel"], dtype=float)
+            y_ref = np.asarray(recon_ref["y"], dtype=float)
 
-                mask_1ms = finite_row & (t_rel <= t1_limit)
-                if np.sum(mask_1ms) >= 2:
-                    integrals_1ms.append(np.trapz(row_abs[mask_1ms], t_rel[mask_1ms]))
+            if x_ref.size >= 2:
+                # Raw/Fitted/Prefiltered integrated metrics and RMSE% at 1/3/5/10/all.
+                source_curves = {
+                    "B_integrated": np.asarray(Beddy, dtype=float),
+                    "B_integrated_fitted": np.asarray(BeddyFitted, dtype=float),
+                }
+                if BePrefilter is not None:
+                    source_curves["B_integrated_prefiltered"] = np.asarray(BePrefilter, dtype=float)
 
-                mask_5ms = finite_row & (t_rel <= t5_limit)
-                if np.sum(mask_5ms) >= 2:
-                    integrals_5ms.append(np.trapz(row_abs[mask_5ms], t_rel[mask_5ms]))
+                for base_col, source_curve in source_curves.items():
+                    recon_src = mm.reconstruct_continuous_series(source_curve, tiempo_arr, dead_time, acq_time)
+                    x_src = np.asarray(recon_src["x_rel"], dtype=float)
+                    y_src = np.asarray(recon_src["y"], dtype=float)
+                    if x_src.size < 2:
+                        continue
 
-                mask_10ms = finite_row & (t_rel <= t10_limit)
-                if np.sum(mask_10ms) >= 2:
-                    integrals_10ms.append(np.trapz(row_abs[mask_10ms], t_rel[mask_10ms]))
+                    t_all = float(x_ref[-1])
+                    val_all = mm.integrate_until_time(x_src, np.abs(y_src), t_all, "trapz")
+                    rmse_pct_all = _rmse_percent_until_time(mm, x_ref, y_ref, x_src, y_src, t_all)
+                    _acc_metric(base_col, val_all)
+                    _acc_metric(f"{base_col}_RMSE%", rmse_pct_all)
 
-            if integrals:
-                B_integrated_all.append(float(np.nanmean(integrals)))
-            if integrals_1ms:
-                B_integrated_1ms_all.append(float(np.nanmean(integrals_1ms)))
-            if integrals_5ms:
-                B_integrated_5ms_all.append(float(np.nanmean(integrals_5ms)))
-            if integrals_10ms:
-                B_integrated_10ms_all.append(float(np.nanmean(integrals_10ms)))
+                    if base_col == "B_integrated":
+                        B_integrated_all.append(val_all)
+
+                    for w in metric_windows_ms:
+                        val_w = mm.integrate_until_time(x_src, np.abs(y_src), float(w), "trapz")
+                        rmse_pct_w = _rmse_percent_until_time(mm, x_ref, y_ref, x_src, y_src, float(w))
+                        tag = f"{int(w)}ms"
+                        _acc_metric(f"{base_col}_{tag}", val_w)
+                        _acc_metric(f"{base_col}_{tag}_RMSE%", rmse_pct_w)
+
+                        if base_col == "B_integrated":
+                            if int(w) == 1:
+                                B_integrated_1ms_all.append(val_w)
+                            elif int(w) == 3:
+                                B_integrated_3ms_all.append(val_w)
+                            elif int(w) == 5:
+                                B_integrated_5ms_all.append(val_w)
+                            elif int(w) == 10:
+                                B_integrated_10ms_all.append(val_w)
+
+                # Exponential fit order 1 and 2 metrics at 1/3/5/10/all.
+                fit_out = mm.fit_exponentials_orders(x_ref, y_ref, [1, 2])
+                fits = [f for f in fit_out.get("fits", []) if f.get("success", False)]
+                fit_by_order = {int(f.get("order", 0)): f for f in fits}
+
+                for order in [1, 2]:
+                    fit = fit_by_order.get(order)
+                    base_col = f"B_integrated_exp_fit{order}"
+                    if fit is None:
+                        _acc_metric(base_col, np.nan)
+                        _acc_metric(f"{base_col}_RMSE%", np.nan)
+                        for w in metric_windows_ms:
+                            tag = f"{int(w)}ms"
+                            _acc_metric(f"{base_col}_{tag}", np.nan)
+                            _acc_metric(f"{base_col}_{tag}_RMSE%", np.nan)
+                        for i in range(1, order + 1):
+                            _acc_metric(f"exp_fit{order}_A{i}", np.nan)
+                            _acc_metric(f"exp_fit{order}_tau{i}", np.nan)
+                        continue
+
+                    x_fit = np.asarray(fit["x"], dtype=float)
+                    y_fit = np.asarray(fit["y_fit"], dtype=float)
+                    t_all = float(x_ref[-1])
+
+                    val_all = mm.integrate_until_time(x_fit, np.abs(y_fit), t_all, "trapz")
+                    rmse_pct_all = _rmse_percent_until_time(mm, x_ref, y_ref, x_fit, y_fit, t_all)
+                    _acc_metric(base_col, val_all)
+                    _acc_metric(f"{base_col}_RMSE%", rmse_pct_all)
+
+                    for w in metric_windows_ms:
+                        val_w = mm.integrate_until_time(x_fit, np.abs(y_fit), float(w), "trapz")
+                        rmse_pct_w = _rmse_percent_until_time(mm, x_ref, y_ref, x_fit, y_fit, float(w))
+                        tag = f"{int(w)}ms"
+                        _acc_metric(f"{base_col}_{tag}", val_w)
+                        _acc_metric(f"{base_col}_{tag}_RMSE%", rmse_pct_w)
+
+                    coeffs = fit.get("coefficients", {})
+                    for i in range(1, order + 1):
+                        _acc_metric(f"exp_fit{order}_A{i}", coeffs.get(f"A{i}", np.nan))
+                        _acc_metric(f"exp_fit{order}_tau{i}", coeffs.get(f"tau{i}", np.nan))
 
             if nDelay_selected == "all" or \
                (isinstance(nDelay_selected, int) and
@@ -437,6 +542,7 @@ def run_measured_analysis(
             B_integrated_1ms_all if len(B_integrated_1ms_all) > 0 else None,
             B_integrated_5ms_all if len(B_integrated_5ms_all) > 0 else None,
             B_integrated_10ms_all if len(B_integrated_10ms_all) > 0 else None,
+            extra_metrics=metric_acc,
         )
 
     if any_legend:
