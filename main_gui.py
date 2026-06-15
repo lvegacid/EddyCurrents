@@ -415,184 +415,87 @@ class _PostprocessAnalyzeDialog(QDialog):
             )
 
 
-class _ChangeFontDialog(QDialog):
-    """Dialog for customizing font sizes and label positions in plots."""
+class _ChangePlotParametersDialog(QDialog):
+    """Dialog to customize plot parameters used by Plot actions."""
 
-    def __init__(self, fig=None, parent=None):
+    def __init__(self, initial_values=None, parent=None):
         super().__init__(parent)
-        self.fig = fig
-        self.setWindowTitle("Change Font")
-        self.setMinimumWidth(550)
-        
+        initial = dict(initial_values or {})
+        self.setWindowTitle("Change Plot Parameters")
+        self.setMinimumWidth(420)
+
         layout = QVBoxLayout(self)
 
-        # ===== Label Position Adjustment =====
-        pos_group = QGroupBox("Label Position Adjustment")
-        pos_layout = QVBoxLayout(pos_group)
-        
-        pos_desc = QLabel("Adjust label position relative to plotted points (in points)")
-        pos_layout.addWidget(pos_desc)
-        
-        # X offset
+        size_group = QGroupBox("Sizes")
+        size_layout = QVBoxLayout(size_group)
+
+        font_row = QHBoxLayout()
+        font_row.addWidget(QLabel("Font size:"))
+        self.font_size_spin = QSpinBox()
+        self.font_size_spin.setRange(1, 72)
+        self.font_size_spin.setValue(int(initial.get("font_size", 12)))
+        font_row.addWidget(self.font_size_spin)
+        font_row.addStretch()
+        size_layout.addLayout(font_row)
+
+        marker_row = QHBoxLayout()
+        marker_row.addWidget(QLabel("Marker size (plot points):"))
+        self.marker_size_spin = QDoubleSpinBox()
+        self.marker_size_spin.setDecimals(1)
+        self.marker_size_spin.setRange(0.5, 25.0)
+        self.marker_size_spin.setSingleStep(0.5)
+        self.marker_size_spin.setValue(float(initial.get("marker_size", 5.0)))
+        marker_row.addWidget(self.marker_size_spin)
+        marker_row.addStretch()
+        size_layout.addLayout(marker_row)
+
+        layout.addWidget(size_group)
+
+        xy_group = QGroupBox("xytext (annotation offset in points)")
+        xy_layout = QVBoxLayout(xy_group)
+
         x_row = QHBoxLayout()
-        x_row.addWidget(QLabel("X offset:"))
-        self.x_offset_spin = QDoubleSpinBox()
-        self.x_offset_spin.setRange(-50, 50)
-        self.x_offset_spin.setSingleStep(1)
-        self.x_offset_spin.setValue(0)
-        x_row.addWidget(self.x_offset_spin)
-        x_row.addWidget(QLabel("points"))
+        x_row.addWidget(QLabel("X:"))
+        self.xytext_x_spin = QDoubleSpinBox()
+        self.xytext_x_spin.setDecimals(1)
+        self.xytext_x_spin.setRange(-100.0, 100.0)
+        self.xytext_x_spin.setSingleStep(1.0)
+        self.xytext_x_spin.setValue(float(initial.get("xytext_x", 20.0)))
+        x_row.addWidget(self.xytext_x_spin)
         x_row.addStretch()
-        pos_layout.addLayout(x_row)
-        
-        # Y offset
+        xy_layout.addLayout(x_row)
+
         y_row = QHBoxLayout()
-        y_row.addWidget(QLabel("Y offset:"))
-        self.y_offset_spin = QDoubleSpinBox()
-        self.y_offset_spin.setRange(-50, 50)
-        self.y_offset_spin.setSingleStep(1)
-        self.y_offset_spin.setValue(12)
-        y_row.addWidget(self.y_offset_spin)
-        y_row.addWidget(QLabel("points"))
+        y_row.addWidget(QLabel("Y:"))
+        self.xytext_y_spin = QDoubleSpinBox()
+        self.xytext_y_spin.setDecimals(1)
+        self.xytext_y_spin.setRange(-100.0, 100.0)
+        self.xytext_y_spin.setSingleStep(1.0)
+        self.xytext_y_spin.setValue(float(initial.get("xytext_y", 12.0)))
+        y_row.addWidget(self.xytext_y_spin)
         y_row.addStretch()
-        pos_layout.addLayout(y_row)
-        
-        layout.addWidget(pos_group)
+        xy_layout.addLayout(y_row)
 
-        # ===== Font Size Controls =====
-        font_group = QGroupBox("Font Size Customization")
-        font_layout = QVBoxLayout(font_group)
-        
-        font_desc = QLabel("Modify font sizes for various plot elements")
-        font_layout.addWidget(font_desc)
-        
-        # Tick labels
-        tick_row = QHBoxLayout()
-        tick_row.addWidget(QLabel("Tick labels fontsize:"))
-        self.tick_fontsize_spin = QSpinBox()
-        self.tick_fontsize_spin.setRange(1, 50)
-        self.tick_fontsize_spin.setValue(10)
-        tick_row.addWidget(self.tick_fontsize_spin)
-        tick_row.addStretch()
-        font_layout.addLayout(tick_row)
-        
-        # Axis labels
-        axis_row = QHBoxLayout()
-        axis_row.addWidget(QLabel("Axis labels fontsize:"))
-        self.axis_fontsize_spin = QSpinBox()
-        self.axis_fontsize_spin.setRange(1, 50)
-        self.axis_fontsize_spin.setValue(12)
-        axis_row.addWidget(self.axis_fontsize_spin)
-        axis_row.addStretch()
-        font_layout.addLayout(axis_row)
-        
-        # Title
-        title_row = QHBoxLayout()
-        title_row.addWidget(QLabel("Title fontsize:"))
-        self.title_fontsize_spin = QSpinBox()
-        self.title_fontsize_spin.setRange(1, 50)
-        self.title_fontsize_spin.setValue(13)
-        title_row.addWidget(self.title_fontsize_spin)
-        title_row.addStretch()
-        font_layout.addLayout(title_row)
-        
-        # Legend
-        legend_row = QHBoxLayout()
-        legend_row.addWidget(QLabel("Legend fontsize:"))
-        self.legend_fontsize_spin = QSpinBox()
-        self.legend_fontsize_spin.setRange(1, 50)
-        self.legend_fontsize_spin.setValue(11)
-        legend_row.addWidget(self.legend_fontsize_spin)
-        legend_row.addStretch()
-        font_layout.addLayout(legend_row)
-        
-        # Point labels/annotations
-        annot_row = QHBoxLayout()
-        annot_row.addWidget(QLabel("Point labels/annotations fontsize:"))
-        self.annot_fontsize_spin = QSpinBox()
-        self.annot_fontsize_spin.setRange(1, 50)
-        self.annot_fontsize_spin.setValue(11)
-        annot_row.addWidget(self.annot_fontsize_spin)
-        annot_row.addStretch()
-        font_layout.addLayout(annot_row)
-        
-        layout.addWidget(font_group)
+        layout.addWidget(xy_group)
 
-        # Buttons
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        
-        apply_btn = QPushButton("Apply")
-        apply_btn.setDefault(True)
-        apply_btn.clicked.connect(self.apply_changes)
-        btn_row.addWidget(apply_btn)
-        
+        ok_btn = QPushButton("OK")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(self.accept)
+        btn_row.addWidget(ok_btn)
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
-        
         layout.addLayout(btn_row)
 
-    def apply_changes(self):
-        """Apply the font customizations to the figure."""
-        if self.fig is None:
-            self.accept()
-            return
-
-        try:
-            # Get values from spinboxes
-            x_offset = self.x_offset_spin.value()
-            y_offset = self.y_offset_spin.value()
-            tick_size = self.tick_fontsize_spin.value()
-            axis_size = self.axis_fontsize_spin.value()
-            title_size = self.title_fontsize_spin.value()
-            legend_size = self.legend_fontsize_spin.value()
-            annot_size = self.annot_fontsize_spin.value()
-
-            # Apply font sizes to all axes
-            for ax in self.fig.axes:
-                # Set tick label font size
-                ax.tick_params(axis='both', which='major', labelsize=tick_size)
-                for label in ax.get_xticklabels():
-                    label.set_fontsize(tick_size)
-                for label in ax.get_yticklabels():
-                    label.set_fontsize(tick_size)
-
-                # Set axis label font size
-                ax.xaxis.label.set_fontsize(axis_size)
-                ax.yaxis.label.set_fontsize(axis_size)
-
-                # Set title font size
-                ax.title.set_fontsize(title_size)
-
-                # Set legend font size
-                legend = ax.get_legend()
-                if legend:
-                    for text in legend.get_texts():
-                        text.set_fontsize(legend_size)
-
-                # Update all text annotations (point labels)
-                for text_obj in ax.texts:
-                    current_fontsize = text_obj.get_fontsize()
-                    # If it's an annotation, update it
-                    if current_fontsize is not None:
-                        text_obj.set_fontsize(annot_size)
-                    
-                    # Apply label position offset
-                    if hasattr(text_obj, 'get_position'):
-                        # For annotations, try to update xytext if available
-                        try:
-                            # This is a bit tricky - we need to update the annotation's offset
-                            if hasattr(text_obj, 'xytext'):
-                                # Relative to original, apply offset
-                                text_obj.xytext = (x_offset, y_offset)
-                        except:
-                            pass
-
-            self.fig.canvas.draw_idle()
-            self.accept()
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to apply changes:\n{e}")
+    def values(self):
+        return {
+            "font_size": int(self.font_size_spin.value()),
+            "xytext_x": float(self.xytext_x_spin.value()),
+            "xytext_y": float(self.xytext_y_spin.value()),
+            "marker_size": float(self.marker_size_spin.value()),
+        }
 
 
 class ZoomLabel(QLabel):
@@ -1149,7 +1052,7 @@ class EddyCurrentGUI(QWidget):
         analyze_row.addWidget(self.analyze_change_dimensions_checkbox)
 
         analyze_row.addSpacing(12)
-        self.analyze_change_font_checkbox = QCheckBox("Change font")
+        self.analyze_change_font_checkbox = QCheckBox("Change plot parameters")
         analyze_row.addWidget(self.analyze_change_font_checkbox)
 
         analyze_row.addStretch()
@@ -1226,7 +1129,7 @@ class EddyCurrentGUI(QWidget):
         compare_row.addWidget(self.change_dimensions_checkbox)
 
         self.compare_grad_combo.addItems(["X", "Y", "Z", "All"])
-        self.change_font_checkbox = QCheckBox("Change font")
+        self.change_font_checkbox = QCheckBox("Change plot parameters")
         compare_row.addWidget(self.change_font_checkbox)
 
         compare_row.addSpacing(12)
@@ -2474,7 +2377,8 @@ class EddyCurrentGUI(QWidget):
 
         spatial_axes = ["X", "Y", "Z"]
         n_rows = len(gradients_to_plot)
-        n_cols = 3
+        is_points_mode = not str(plot_type).lower().startswith("hist")
+        n_cols = 4 if is_points_mode else 3
         n_cases = len(compare_cases)
 
         # Build per-case color palette
@@ -2493,7 +2397,7 @@ class EddyCurrentGUI(QWidget):
 
         fig, axes = plt.subplots(
             n_rows, n_cols,
-            figsize=(18, max(4.5, 3.8 * n_rows)),
+            figsize=((22 if n_cols == 4 else 18), max(4.5, 3.8 * n_rows)),
             squeeze=False,
         )
 
@@ -2560,6 +2464,60 @@ class EddyCurrentGUI(QWidget):
                 ax.set_ylabel(measured_column if ax_idx == 0 else "")
                 ax.set_xlabel("Phantom position" if grad_idx == n_rows - 1 else "")
                 ax.grid(True, alpha=0.35)
+
+            # For Points mode, add a 4th subplot with one histogram-summary bar per case.
+            if is_points_mode:
+                ax_hist = axes[grad_idx, 3]
+                case_labels = []
+                mean_abs_values = []
+                phantom_order_all = getattr(self, "_METRICS_PHANTOM_ORDER", ["Center", "+X", "-X", "+Y", "-Y", "+Z", "-Z"])
+
+                for case_idx, case in enumerate(compare_cases):
+                    df_meas = self._load_single_value_measured_table(case)
+                    if "Grad" not in df_meas.columns:
+                        raise ValueError(f"Column 'Grad' not found in measured table ({case.get('setup', '')}).")
+                    if "Phantom_position" not in df_meas.columns:
+                        raise ValueError(f"Column 'Phantom_position' not found in measured table ({case.get('setup', '')}).")
+                    if measured_column not in df_meas.columns:
+                        raise ValueError(
+                            f"Column '{measured_column}' not found in measured table ({case.get('setup', '')})."
+                        )
+
+                    df_meas = df_meas.copy()
+                    df_meas[measured_column] = pd.to_numeric(df_meas[measured_column], errors="coerce")
+                    df_filtered = df_meas[df_meas["Grad"].astype(str).str.upper() == table_grad]
+
+                    abs_vals = []
+                    for phantom_name in phantom_order_all:
+                        row = df_filtered[df_filtered["Phantom_position"].astype(str) == phantom_name]
+                        if row.empty:
+                            continue
+                        val = float(row.iloc[0][measured_column])
+                        if np.isfinite(val):
+                            abs_vals.append(abs(val))
+
+                    mean_abs = float(np.nanmean(abs_vals)) if len(abs_vals) > 0 else np.nan
+                    mean_abs_values.append(mean_abs)
+                    case_labels.append(self._case_display_name(case, case_idx, custom_labels))
+
+                    if palette_colors:
+                        color = palette_colors[case_idx]
+                    else:
+                        lighten = min(0.85, 0.35 * case_idx)
+                        color = tuple(np.clip(grad_base + (1.0 - grad_base) * lighten, 0.0, 1.0))
+
+                    x_pos = float(case_idx)
+                    height = 0.0 if not np.isfinite(mean_abs) else mean_abs
+                    ax_hist.bar(x_pos, height, width=0.62, alpha=0.85, color=color)
+                    if np.isfinite(mean_abs):
+                        ax_hist.text(x_pos, mean_abs, f"{mean_abs:.3g}", ha="center", va="bottom", fontsize=8)
+
+                ax_hist.set_xticks(list(range(len(case_labels))))
+                ax_hist.set_xticklabels(case_labels, rotation=20, ha="right")
+                ax_hist.set_title(f"G{grad_token[-1]} histogram |v| (mean of 7)", fontsize=10)
+                ax_hist.set_ylabel(f"mean(|{measured_column}|)")
+                ax_hist.set_xlabel("Case" if grad_idx == n_rows - 1 else "")
+                ax_hist.grid(True, axis="y", alpha=0.35)
 
             # Legend only in the first column of this gradient row
             if plotted_any:
@@ -3932,8 +3890,8 @@ class EddyCurrentGUI(QWidget):
 
                         plt.annotate(f"{y0_measured:.2f}",
                                      (x0, y0_measured),
-                                     textcoords="offset points", xytext=(0, 12),
-                                     ha='center', fontsize=11, color=color, fontweight='bold')
+                                     textcoords="offset points", xytext=(20, 12),
+                                     ha='left', fontsize=11, color=color, fontweight='bold')
 
                         plt.annotate(f"/ {y0_fitted:.2f} (fitted)",
                                      (x0, y0_measured),
@@ -4048,8 +4006,8 @@ class EddyCurrentGUI(QWidget):
                             # Measured value in file color (bold)
                             plt.annotate(f"{y0_measured:.2f}",
                                        (x0, y0_measured),
-                                       textcoords="offset points", xytext=(0, 12),
-                                       ha='center', fontsize=11, color=color, fontweight='bold')
+                                       textcoords="offset points", xytext=(20, 12),
+                                       ha='left', fontsize=11, color=color, fontweight='bold')
                             
                             # Fitted value in gray (slash separates)
                             plt.annotate(f"/ {y0_fitted:.2f} (fitted)",
@@ -4243,8 +4201,129 @@ class EddyCurrentGUI(QWidget):
         except Exception:
             pass
 
+    def _default_plot_parameters(self):
+        return {
+            "font_size": 12,
+            "xytext_x": 20.0,
+            "xytext_y": 12.0,
+            "marker_size": 5.0,
+        }
+
+    def _load_plot_parameters(self):
+        params = self._default_plot_parameters()
+        settings = getattr(self, "settings", None)
+        if settings is None:
+            return params
+
+        try:
+            params["font_size"] = int(settings.value("plot_params/font_size", params["font_size"]))
+        except Exception:
+            pass
+        try:
+            params["xytext_x"] = float(settings.value("plot_params/xytext_x", params["xytext_x"]))
+        except Exception:
+            pass
+        try:
+            params["xytext_y"] = float(settings.value("plot_params/xytext_y", params["xytext_y"]))
+        except Exception:
+            pass
+        try:
+            params["marker_size"] = float(settings.value("plot_params/marker_size", params["marker_size"]))
+        except Exception:
+            pass
+        return params
+
+    def _save_plot_parameters(self, params):
+        settings = getattr(self, "settings", None)
+        if settings is None:
+            return
+        settings.setValue("plot_params/font_size", int(params.get("font_size", 12)))
+        settings.setValue("plot_params/xytext_x", float(params.get("xytext_x", 20.0)))
+        settings.setValue("plot_params/xytext_y", float(params.get("xytext_y", 12.0)))
+        settings.setValue("plot_params/marker_size", float(params.get("marker_size", 5.0)))
+
+    def _apply_plot_parameters_to_figure(self, fig, params):
+        import matplotlib
+
+        if fig is None:
+            return
+
+        font_size = int(params.get("font_size", 12))
+        marker_size = float(params.get("marker_size", 5.0))
+        xytext_x = float(params.get("xytext_x", 20.0))
+        xytext_y = float(params.get("xytext_y", 12.0))
+
+        # Preserve current legend marker appearance before changing plot markers.
+        legend_marker_sizes = {}
+        for ax in fig.axes:
+            legend = ax.get_legend()
+            if legend is None:
+                continue
+            handles = list(getattr(legend, "legend_handles", []))
+            if not handles and hasattr(legend, "legendHandles"):
+                handles = list(getattr(legend, "legendHandles", []))
+            sizes = []
+            for h in handles:
+                if hasattr(h, "get_markersize"):
+                    try:
+                        sizes.append(float(h.get_markersize()))
+                    except Exception:
+                        sizes.append(np.nan)
+                else:
+                    sizes.append(np.nan)
+            legend_marker_sizes[id(ax)] = sizes
+
+        for ax in fig.axes:
+            ax.title.set_fontsize(font_size)
+            ax.xaxis.label.set_fontsize(font_size)
+            ax.yaxis.label.set_fontsize(font_size)
+            ax.tick_params(axis='both', labelsize=font_size)
+
+            legend = ax.get_legend()
+            if legend is not None:
+                for txt in legend.get_texts():
+                    txt.set_fontsize(font_size)
+                legend_title = legend.get_title()
+                if legend_title is not None:
+                    legend_title.set_fontsize(font_size)
+
+            # Apply point size only to plotted markers.
+            for line in ax.get_lines():
+                marker = line.get_marker()
+                if marker not in (None, "", "None", " "):
+                    line.set_markersize(marker_size)
+
+            # Move annotations according to xytext and set their font.
+            for txt in ax.texts:
+                txt.set_fontsize(font_size)
+                if isinstance(txt, matplotlib.text.Annotation):
+                    try:
+                        txt.set_position((xytext_x, xytext_y))
+                        txt.set_ha('left')
+                    except Exception:
+                        pass
+
+            # Restore legend marker size so legend readability stays unchanged.
+            if legend is not None:
+                handles = list(getattr(legend, "legend_handles", []))
+                if not handles and hasattr(legend, "legendHandles"):
+                    handles = list(getattr(legend, "legendHandles", []))
+                old_sizes = legend_marker_sizes.get(id(ax), [])
+                for idx, h in enumerate(handles):
+                    if not hasattr(h, "set_markersize"):
+                        continue
+                    if idx < len(old_sizes) and np.isfinite(old_sizes[idx]):
+                        h.set_markersize(float(old_sizes[idx]))
+
+        if getattr(fig, "_suptitle", None) is not None:
+            fig._suptitle.set_fontsize(font_size)
+        for txt in fig.texts:
+            txt.set_fontsize(font_size)
+
+        fig.canvas.draw_idle()
+
     def _maybe_customize_fonts(self, fig):
-        """Optionally apply one global font size to all plot text elements."""
+        """Optionally customize plot parameters (font, xytext offset, marker size)."""
         if fig is None:
             return
 
@@ -4257,45 +4336,16 @@ class EddyCurrentGUI(QWidget):
             return
 
         try:
-            font_size, ok = QInputDialog.getInt(
-                self,
-                "Change Font",
-                "Global font size:",
-                value=12,
-                min=1,
-                max=72,
-                step=1,
-            )
-            if not ok:
+            current = self._load_plot_parameters()
+            dlg = _ChangePlotParametersDialog(initial_values=current, parent=self)
+            if dlg.exec_() != QDialog.Accepted:
                 return
 
-            # Apply the same size everywhere (titles, labels, ticks, legends, annotations).
-            for ax in fig.axes:
-                ax.title.set_fontsize(font_size)
-                ax.xaxis.label.set_fontsize(font_size)
-                ax.yaxis.label.set_fontsize(font_size)
-                ax.tick_params(axis='both', labelsize=font_size)
-
-                legend = ax.get_legend()
-                if legend is not None:
-                    for txt in legend.get_texts():
-                        txt.set_fontsize(font_size)
-                    legend_title = legend.get_title()
-                    if legend_title is not None:
-                        legend_title.set_fontsize(font_size)
-
-                for txt in ax.texts:
-                    txt.set_fontsize(font_size)
-
-            if getattr(fig, "_suptitle", None) is not None:
-                fig._suptitle.set_fontsize(font_size)
-
-            for txt in fig.texts:
-                txt.set_fontsize(font_size)
-
-            fig.canvas.draw_idle()
+            params = dlg.values()
+            self._save_plot_parameters(params)
+            self._apply_plot_parameters_to_figure(fig, params)
         except Exception as e:
-            QMessageBox.warning(self, "Font Customization", f"Error: {e}")
+            QMessageBox.warning(self, "Plot Parameters", f"Error: {e}")
 
     def update_gradient_options(self):
         """Update gradient dropdown based on plot type."""
@@ -4753,6 +4803,8 @@ class EddyCurrentGUI(QWidget):
             sample_range = np.linspace(0.0, upper, len(cases))
             palette_colors = [cmap(pos) for pos in sample_range]
 
+        include_fitted_legend = bool(apply_filter)
+
         if gradient == "All":
             grad_list = ['x', 'y', 'z']
         else:
@@ -4908,15 +4960,15 @@ class EddyCurrentGUI(QWidget):
                                 f"{y0_measured:.2f}",
                                 (x0, y0_measured),
                                 textcoords="offset points",
-                                xytext=(0, 12),
-                                ha='center',
+                                xytext=(20, 12),
+                                ha='left',
                                 fontsize=10,
                                 color=color,
                                 fontweight='bold'
                             )
                             firstpoint_label_added = True
 
-                        if not fitted_label_added:
+                        if include_fitted_legend and (not fitted_label_added):
                             current_ax.plot(
                                 tiempo_corr,
                                 BeddyFitted[n, :],
@@ -4987,6 +5039,8 @@ class EddyCurrentGUI(QWidget):
             upper = 0.70 if colormap == "Inferno" else 0.85
             sample_range = np.linspace(0.0, upper, len(cases))
             palette_colors = [cmap(pos) for pos in sample_range]
+
+        include_fitted_legend = bool(apply_filter)
 
         if gradient == "All":
             grad_list = ['x', 'y', 'z']
@@ -5116,11 +5170,11 @@ class EddyCurrentGUI(QWidget):
                             if not firstpoint_label_added:
                                 y0_measured = Beddy[n, 0]
                                 x0 = tiempo_corr[0]
-                                ax.annotate(f"{y0_measured:.2f}", (x0, y0_measured), textcoords="offset points", xytext=(0, 12),
-                                            ha='center', fontsize=9, color=color, fontweight='bold')
+                                ax.annotate(f"{y0_measured:.2f}", (x0, y0_measured), textcoords="offset points", xytext=(20, 12),
+                                            ha='left', fontsize=9, color=color, fontweight='bold')
                                 firstpoint_label_added = True
 
-                            if not fitted_label_added:
+                            if include_fitted_legend and (not fitted_label_added):
                                 ax.plot(
                                     tiempo_corr,
                                     BeddyFitted[n, :],

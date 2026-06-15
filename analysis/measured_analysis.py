@@ -414,8 +414,8 @@ def run_measured_analysis(
                         # measured value in gradient color
                         plt.annotate(f"{y0_measured:.2f}",
                                    (x0, y0_measured),
-                                   textcoords="offset points", xytext=(0, 12),
-                                   ha='center', fontsize=11, color=color, fontweight='bold')
+                                   textcoords="offset points", xytext=(20, 12),
+                                   ha='left', fontsize=11, color=color, fontweight='bold')
 
                         # fitted descriptor inline in gray (slash separates)
                         plt.annotate(f"/ {y0_fitted:.2f} (fitted)",
@@ -497,8 +497,8 @@ def run_measured_analysis(
                 # measured value
                 plt.annotate(f"{y0_measured:.2f}",
                            (x0, y0_measured),
-                           textcoords="offset points", xytext=(0, 12),
-                           ha='center', fontsize=11, color=color, fontweight='bold')
+                           textcoords="offset points", xytext=(20, 12),
+                           ha='left', fontsize=11, color=color, fontweight='bold')
 
                 # fitted value in gray right of measured (slash separates)
                 plt.annotate(f"/ {y0_fitted:.2f} (fitted)",
@@ -527,8 +527,8 @@ def run_measured_analysis(
                 # fitted label
                 plt.annotate("(fitted)",
                            (x0, y0_measured),
-                           textcoords="offset points", xytext=(0, -3),
-                           ha='center', fontsize=9, color='gray', fontweight='bold')
+                           textcoords="offset points", xytext=(20, -3),
+                           ha='left', fontsize=9, color='gray', fontweight='bold')
 
         update_t0_table(
             base_path,

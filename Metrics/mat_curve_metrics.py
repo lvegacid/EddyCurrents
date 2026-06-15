@@ -54,10 +54,11 @@ DEBUG_RECONSTRUCTION = True
 # Exponential fitting settings (additive module)
 # Alias requested by user: ext_order
 ext_order: List[int] = [1, 2, 3, 4, 5]
-TARGET_RMSE_PERCENT = 2.0  # Example: 2.0. If None, target search is skipped.
+TARGET_RMSE_PERCENT = 0.50  # Example: 2.0. If None, target search is skipped.
 PLOT_EXP_FITS = True
 EXP_FITS_PLOT_PATH = r"exp_fits_comparison.png"
 SHOW_EXP_FITS = True
+
 
 
 # ============================================================================
