@@ -225,11 +225,37 @@ function build_gui(default_mli_path)
         'FontSize', 12);
 
     app.rbCylinder = uiradiobutton(app.analysisTypeGroup, ...
-        'Text',     'Cylinder  (Not yet implemented)', ...
+        'Text',     'Cylinder', ...
         'Tag',      'rbCylinder', ...
         'Value',    false, ...
-        'Position', [120 12 280 22], ...
+        'Position', [120 12 100 22], ...
         'FontSize', 12);
+
+    app.radiusLabel = uilabel(fig, ...
+        'Text',     'Radius (mm):', ...
+        'Visible',  'off', ...
+        'Position', [370 474 90 22], ...
+        'FontWeight', 'bold');
+
+    app.radiusField = uieditfield(fig, 'text', ...
+        'Value',    '', ...
+        'Visible',  'off', ...
+        'Enable',   'off', ...
+        'BackgroundColor', [0.98 0.99 1.00], ...
+        'Position', [465 472 120 24]);
+
+    app.heightLabel = uilabel(fig, ...
+        'Text',     'Height (mm):', ...
+        'Visible',  'off', ...
+        'Position', [610 474 90 22], ...
+        'FontWeight', 'bold');
+
+    app.heightField = uieditfield(fig, 'text', ...
+        'Value',    '', ...
+        'Visible',  'off', ...
+        'Enable',   'off', ...
+        'BackgroundColor', [0.98 0.99 1.00], ...
+        'Position', [705 472 120 24]);
 
     % ------------------------------------------------------------------
     %  Section 5 — Offset  (y 430 … 395)
@@ -438,16 +464,31 @@ end
 
 % --- Req 4.2 / 4.4 --------------------------------------------------------
 function cb_analysis_type(fig, evt)
-% cb_analysis_type  Enable/disable Extract button based on selected radio.
+% cb_analysis_type  Toggle analysis-type controls and Extract button state.
     app = fig.UserData;
-    if strcmp(evt.NewValue.Tag, 'rbCylinder')
-        app.extractBtn.Enable = 'off';
+    is_cylinder = strcmp(evt.NewValue.Tag, 'rbCylinder');
+
+    if is_cylinder
+        cyl_vis = 'on';
     else
-        % rbPoint — re-enable only if a model is already loaded
-        if ~isempty(app.model)
-            app.extractBtn.Enable = 'on';
-        end
+        cyl_vis = 'off';
     end
+
+    app.radiusLabel.Visible = cyl_vis;
+    app.radiusField.Visible = cyl_vis;
+    app.heightLabel.Visible = cyl_vis;
+    app.heightField.Visible = cyl_vis;
+
+    if ~isempty(app.model)
+        app.radiusField.Enable = cyl_vis;
+        app.heightField.Enable = cyl_vis;
+        app.extractBtn.Enable = 'on';
+    else
+        app.extractBtn.Enable = 'off';
+    end
+
+    fig.UserData = app;
+    figure(fig);   % devuelve el foco a la ventana GUI tras cambiar la selección
 end
 
 % --- Req 1.5 / connect -----------------------------------------------------
@@ -541,7 +582,7 @@ function cb_browse_model(fig)
 
     fullpath = fullfile(fpath, fname);
 
-    model = load_model(fullpath);
+    model = load_model(fullpath, fig);
     if isempty(model)
         return;  % load_model already showed error dialog
     end
@@ -589,7 +630,20 @@ function gui_log(logArea, msg)
 end
 
 % --------------------------------------------------------------------------
-function model_out = load_model(model_path)
+function ui_errordlg(fig, message, title)
+% ui_errordlg  Show an error dialog for uifigure-based GUI callbacks.
+    if nargin < 3 || isempty(title)
+        title = 'Error';
+    end
+    if nargin >= 1 && ~isempty(fig) && isvalid(fig)
+        uialert(fig, message, title, 'Icon', 'error');
+    else
+        errordlg(message, title);
+    end
+end
+
+% --------------------------------------------------------------------------
+function model_out = load_model(model_path, fig)
 % load_model  Load a .mph COMSOL model via the LiveLink API.
 %
 % PURPOSE:
@@ -598,7 +652,7 @@ function model_out = load_model(model_path)
 %   (established by the "Connect" button / cb_connect).  If mphload fails
 %   because the server is not connected, a specific message instructs the
 %   user to press "Connect" first.  All other mphload errors are displayed
-%   via uierrordlg with the raw MATLAB error message.
+%   via ui_errordlg with the raw MATLAB error message.
 %
 %   NOTE: mphstart is NOT called here.  Server startup / connection is the
 %   sole responsibility of cb_connect / comsol_livelink_connection.
@@ -634,13 +688,13 @@ function model_out = load_model(model_path)
         msg_lower = lower(err.message);
         if contains(msg_lower, 'not connected') || ...
                 contains(msg_lower, 'connection refused')
-            uierrordlg( ...
+            ui_errordlg(fig, ...
                 ['COMSOL server is not connected. ' ...
                  'Please press "Connect" first, then try loading the model again.' ...
                  newline newline 'Detail: ' err.message], ...
                 'Model Load Error');
         else
-            uierrordlg(err.message, 'Model Load Error');
+            ui_errordlg(fig, err.message, 'Model Load Error');
         end
         model_out = [];
     end
@@ -1254,9 +1308,18 @@ function after_model_load(fig)
     app.filterTimeField.Enable  = 'on';
     app.applyOffsetCheck.Enable = 'on';
 
-    % Step 13 — Enable Extract button only when Point analysis is selected
-    if app.rbPoint.Value
+    % Step 13 — Enable Extract button when Point or Cylinder analysis is selected
+    if app.rbPoint.Value || app.rbCylinder.Value
         app.extractBtn.Enable = 'on';
+    end
+
+    if app.rbCylinder.Value
+        app.radiusField.Enable = 'on';
+        app.heightField.Enable = 'on';
+        app.radiusLabel.Visible = 'on';
+        app.radiusField.Visible = 'on';
+        app.heightLabel.Visible = 'on';
+        app.heightField.Visible = 'on';
     end
 
     % Step 14 — Log summary message
@@ -1422,7 +1485,7 @@ function cb_study_changed(fig, selected_label)
 
     if isempty(app.comp_sol_id)
         app.extractBtn.Enable = 'off';
-    elseif app.rbPoint.Value && ~isempty(app.model)
+    elseif (app.rbPoint.Value || app.rbCylinder.Value) && ~isempty(app.model)
         app.extractBtn.Enable = 'on';
     end
 
@@ -1439,7 +1502,7 @@ function [offsets_mm, valid] = parse_offset_field(field_str, fig)
 %     - Empty / whitespace-only input  → treated as a single 0 mm value
 %     - Single numeric value           → [val_mm]
 %     - Comma-separated list           → [val1_mm, val2_mm, …]
-%   Validation errors are surfaced via uierrordlg (blocking) or uiconfirm
+%   Validation errors are surfaced via ui_errordlg (blocking) or uiconfirm
 %   (non-blocking warning that lets the user cancel).
 %
 % INPUT ARGUMENTS:
@@ -1481,7 +1544,7 @@ function [offsets_mm, valid] = parse_offset_field(field_str, fig)
     for k = 1:numel(tokens)
         v = str2double(strtrim(tokens{k}));
         if isnan(v)
-            uierrordlg( ...
+            ui_errordlg(fig, ...
                 'Invalid offset value: must be numeric (e.g. 10 or 10,20,30).', ...
                 'Invalid Offset');
             return;   % offsets_mm = [], valid = false
@@ -1531,23 +1594,28 @@ function cb_extract(fig)
     app = fig.UserData;
 
     if isempty(app.model)
-        uierrordlg('Please load a COMSOL model before extracting.', 'Missing Model');
+        ui_errordlg(fig, 'Please load a COMSOL model before extracting.', 'Missing Model');
         return;
     end
 
     if isempty(app.ref_sol_id) || isempty(app.comp_sol_id)
-        uierrordlg('Could not resolve reference/comparison solution IDs.', 'Missing Solution ID');
+        ui_errordlg(fig, 'Could not resolve reference/comparison solution IDs.', 'Missing Solution ID');
+        return;
+    end
+
+    if app.rbCylinder.Value
+        run_cylinder_extraction(fig);
         return;
     end
 
     if ~app.rbPoint.Value
-        uierrordlg('Only Point analysis is currently implemented.', 'Not Implemented');
+        ui_errordlg(fig, 'Please select Point or Cylinder analysis type.', 'Missing Analysis Type');
         return;
     end
 
     out_folder = strtrim(app.outputFolderField.Value);
     if isempty(out_folder)
-        uierrordlg('Please select an output folder before extracting.', 'Missing Output Folder');
+        ui_errordlg(fig, 'Please select an output folder before extracting.', 'Missing Output Folder');
         return;
     end
 
@@ -1555,7 +1623,7 @@ function cb_extract(fig)
         try
             mkdir(out_folder);
         catch err
-            uierrordlg(err.message, 'Output Folder Error');
+            ui_errordlg(fig, err.message, 'Output Folder Error');
             return;
         end
     end
@@ -1565,7 +1633,7 @@ function cb_extract(fig)
     try
         apply_time_filter([0; 1], [0; 1], filter_text);
     catch err
-        uierrordlg(err.message, 'Invalid Time Filter');
+        ui_errordlg(fig, err.message, 'Invalid Time Filter');
         return;
     end
 
@@ -2062,4 +2130,542 @@ function [t_vec, y_vec] = read_comsol_point_export(file_path)
     finite_mask = isfinite(t_vals) & isfinite(y_vals);
     t_vec = t_vals(finite_mask);
     y_vec = y_vals(finite_mask);
+end
+
+% --------------------------------------------------------------------------
+function run_cylinder_extraction(fig)
+% run_cylinder_extraction  End-to-end cylinder volume-average extraction workflow.
+
+    app = fig.UserData;
+
+    out_folder = strtrim(app.outputFolderField.Value);
+    if isempty(out_folder)
+        ui_errordlg(fig, 'Please select an output folder before extracting.', 'Missing Output Folder');
+        return;
+    end
+
+    if ~exist(out_folder, 'dir')
+        try
+            mkdir(out_folder);
+        catch err
+            ui_errordlg(fig, err.message, 'Output Folder Error');
+            return;
+        end
+    end
+
+    filter_text = app.filterTimeField.Value;
+    try
+        apply_time_filter([0; 1], [0; 1], filter_text);
+    catch err
+        ui_errordlg(fig, err.message, 'Invalid Time Filter');
+        return;
+    end
+
+    [r_vals_mm, okr] = parse_dimension_field(app.radiusField.Value, 'Radius (mm)', fig);
+    if ~okr, return; end
+    [h_vals_mm, okh] = parse_dimension_field(app.heightField.Value, 'Height (mm)', fig);
+    if ~okh, return; end
+
+    x_vals_mm = [];
+    y_vals_mm = [];
+    z_vals_mm = [];
+
+    if app.applyOffsetCheck.Value
+        [x_vals_mm, okx] = parse_offset_field(app.offsetXField.Value, fig);
+        if ~okx, return; end
+        [y_vals_mm, oky] = parse_offset_field(app.offsetYField.Value, fig);
+        if ~oky, return; end
+        [z_vals_mm, okz] = parse_offset_field(app.offsetZField.Value, fig);
+        if ~okz, return; end
+
+        x_vals_mm = x_vals_mm(x_vals_mm ~= 0);
+        y_vals_mm = y_vals_mm(y_vals_mm ~= 0);
+        z_vals_mm = z_vals_mm(z_vals_mm ~= 0);
+    end
+
+    point_locations = get_point_locations();
+    locations = {point_locations.name};
+
+    for i = 1:numel(locations)
+        folder_i = fullfile(out_folder, locations{i});
+        if ~exist(folder_i, 'dir')
+            mkdir(folder_i);
+        end
+    end
+
+    dataset_tag = resolve_cylinder_dataset_tag(app.model, app.comp_sol_id);
+    if isempty(dataset_tag)
+        ui_errordlg(fig, ...
+            'Could not resolve a comp2 volume dataset for cylinder extraction.', ...
+            'Missing Dataset');
+        return;
+    end
+
+    total_jobs = numel(h_vals_mm) * numel(r_vals_mm) * numel(locations);
+    if app.applyOffsetCheck.Value
+        total_jobs = total_jobs + numel(h_vals_mm) * numel(r_vals_mm) * numel(locations) * ...
+            (numel(x_vals_mm) + numel(y_vals_mm) + numel(z_vals_mm));
+    end
+
+    app.cancel_requested = false;
+    app.overwrite_policy = 'unset';
+    app.extractBtn.Enable = 'off';
+    app.cancelBtn.Enable = 'on';
+    app.progressLabel.Text = sprintf('Starting cylinder extraction (0/%d)...', total_jobs);
+    fig.UserData = app;
+
+    written_count = 0;
+    skipped_count = 0;
+    error_count = 0;
+    job_index = 0;
+    cancelled = false;
+
+    for h_mm = h_vals_mm
+        for r_mm = r_vals_mm
+            set_cylinder_geometry_params(app.model, r_mm, h_mm);
+            refresh_cylinder_geometry_and_solutions(app.model, app.ref_sol_id, app.comp_sol_id);
+
+            for i = 1:numel(locations)
+                loc_name = locations{i};
+
+                [job_index, written_count, skipped_count, error_count] = ...
+                    process_one_cylinder(fig, app.model, out_folder, loc_name, ...
+                        app.ref_sol_id, app.comp_sol_id, dataset_tag, filter_text, ...
+                        h_mm, r_mm, [], [], job_index, total_jobs, ...
+                        written_count, skipped_count, error_count);
+
+                drawnow;
+                app = fig.UserData;
+                if app.cancel_requested
+                    cancelled = true;
+                    break;
+                end
+
+                if app.applyOffsetCheck.Value
+                    for vx = x_vals_mm
+                        [job_index, written_count, skipped_count, error_count] = ...
+                            process_one_cylinder(fig, app.model, out_folder, loc_name, ...
+                                app.ref_sol_id, app.comp_sol_id, dataset_tag, filter_text, ...
+                                h_mm, r_mm, 'X', vx, job_index, total_jobs, ...
+                                written_count, skipped_count, error_count);
+
+                        drawnow;
+                        app = fig.UserData;
+                        if app.cancel_requested
+                            cancelled = true;
+                            break;
+                        end
+                    end
+                    if cancelled, break; end
+
+                    for vy = y_vals_mm
+                        [job_index, written_count, skipped_count, error_count] = ...
+                            process_one_cylinder(fig, app.model, out_folder, loc_name, ...
+                                app.ref_sol_id, app.comp_sol_id, dataset_tag, filter_text, ...
+                                h_mm, r_mm, 'Y', vy, job_index, total_jobs, ...
+                                written_count, skipped_count, error_count);
+
+                        drawnow;
+                        app = fig.UserData;
+                        if app.cancel_requested
+                            cancelled = true;
+                            break;
+                        end
+                    end
+                    if cancelled, break; end
+
+                    for vz = z_vals_mm
+                        [job_index, written_count, skipped_count, error_count] = ...
+                            process_one_cylinder(fig, app.model, out_folder, loc_name, ...
+                                app.ref_sol_id, app.comp_sol_id, dataset_tag, filter_text, ...
+                                h_mm, r_mm, 'Z', vz, job_index, total_jobs, ...
+                                written_count, skipped_count, error_count);
+
+                        drawnow;
+                        app = fig.UserData;
+                        if app.cancel_requested
+                            cancelled = true;
+                            break;
+                        end
+                    end
+                    if cancelled, break; end
+                end
+            end
+            if cancelled, break; end
+        end
+        if cancelled, break; end
+    end
+
+    set_cylinder_position_params(app.model, 0, 0, 0);
+
+    app = fig.UserData;
+    app.cancel_requested = false;
+    app.cancelBtn.Enable = 'off';
+    if app.rbCylinder.Value && ~isempty(app.model)
+        app.extractBtn.Enable = 'on';
+    end
+
+    if cancelled
+        app.progressLabel.Text = sprintf('Cancelled (%d/%d).', job_index, total_jobs);
+        fig.UserData = app;
+        uialert(fig, ...
+            sprintf('Extraction cancelled. Written: %d, Skipped: %d, Errors: %d.', ...
+                written_count, skipped_count, error_count), ...
+            'Extraction Cancelled', ...
+            'Icon', 'warning');
+        return;
+    end
+
+    app.progressLabel.Text = sprintf('Completed (%d/%d).', job_index, total_jobs);
+    fig.UserData = app;
+
+    uialert(fig, ...
+        sprintf('Extraction complete. Written: %d, Skipped: %d, Errors: %d.', ...
+            written_count, skipped_count, error_count), ...
+        'Extraction Complete', ...
+        'Icon', 'success');
+end
+
+% --------------------------------------------------------------------------
+function [vals_mm, valid] = parse_dimension_field(field_str, field_label, fig)
+% parse_dimension_field  Parse a required radius/height field (mm).
+    if isempty(strtrim(field_str))
+        ui_errordlg(fig, sprintf('Please enter %s before extracting.', field_label), 'Missing Input');
+        vals_mm = [];
+        valid = false;
+        return;
+    end
+    [vals_mm, valid] = parse_offset_field(field_str, fig);
+end
+
+% --------------------------------------------------------------------------
+function [job_index, written_count, skipped_count, error_count] = process_one_cylinder( ...
+    fig, model, out_folder, loc_name, ref_sol_id, comp_sol_id, dataset_tag, filter_text, ...
+    h_mm, r_mm, axis_name, offset_mm, job_index, total_jobs, ...
+    written_count, skipped_count, error_count)
+% process_one_cylinder  Evaluate and export one cylinder volume-average trace.
+
+    app = fig.UserData;
+
+    job_index = job_index + 1;
+    app.progressLabel.Text = sprintf('Processing %d/%d: %s h=%s r=%s', ...
+        job_index, total_jobs, loc_name, format_offset_value(h_mm), format_offset_value(r_mm));
+    fig.UserData = app;
+
+    try
+        target_path = compose_cylinder_output_file_path( ...
+            out_folder, h_mm, r_mm, loc_name, axis_name, offset_mm);
+        [allow_write, app.overwrite_policy] = evaluate_overwrite(target_path, app.overwrite_policy, fig);
+        fig.UserData = app;
+        if ~allow_write
+            skipped_count = skipped_count + 1;
+            gui_log(app.logArea, ['SKIP (exists): ' target_path]);
+            return;
+        end
+
+        set_cylinder_position_for_location(model, loc_name, axis_name, offset_mm);
+        refresh_cylinder_geometry_and_solutions(model, ref_sol_id, comp_sol_id);
+
+        [t_vec, b_uT] = extract_cylinder_data( ...
+            model, dataset_tag, ref_sol_id, comp_sol_id, target_path);
+
+        [t_f, b_f] = apply_time_filter(t_vec, b_uT, filter_text);
+        if isempty(t_f)
+            gui_log(app.logArea, ...
+                sprintf('WARN: Filter removed all samples for %s (%s).', ...
+                    loc_name, format_cylinder_case_label(h_mm, r_mm, axis_name, offset_mm)));
+            skipped_count = skipped_count + 1;
+            return;
+        end
+
+        write_cylinder_output_file(out_folder, h_mm, r_mm, loc_name, axis_name, offset_mm, t_f, b_f);
+        written_count = written_count + 1;
+        gui_log(app.logArea, ['OK: ' target_path]);
+    catch err
+        error_count = error_count + 1;
+        gui_log(app.logArea, ...
+            sprintf('ERROR [%s, %s]: %s', loc_name, ...
+                format_cylinder_case_label(h_mm, r_mm, axis_name, offset_mm), err.message));
+    end
+end
+
+% --------------------------------------------------------------------------
+function label = format_cylinder_case_label(h_mm, r_mm, axis_name, offset_mm)
+% format_cylinder_case_label  Human-readable cylinder job descriptor for logging.
+    base = sprintf('h=%smm r=%smm', format_offset_value(h_mm), format_offset_value(r_mm));
+    if isempty(axis_name)
+        label = [base ', Nominal'];
+    else
+        label = sprintf('%s, Offset%s=%smm', base, upper(axis_name(1)), format_offset_value(offset_mm));
+    end
+end
+
+% --------------------------------------------------------------------------
+function file_path = compose_cylinder_output_file_path(out_folder, h_mm, r_mm, location, axis, val_mm)
+% compose_cylinder_output_file_path  Build the cylinder output file path without writing.
+    h_str = format_offset_value(h_mm);
+    r_str = format_offset_value(r_mm);
+    if isempty(axis)
+        fname = sprintf('Beddy_Time_Cylinder_h%smm_r%smm_%s.txt', h_str, r_str, location);
+    else
+        fname = sprintf('Beddy_Time_Cylinder_h%smm_r%smm_%s_Offset_%s_%smm.txt', ...
+            h_str, r_str, location, upper(axis(1)), format_offset_value(val_mm));
+    end
+    file_path = fullfile(out_folder, location, fname);
+end
+
+% --------------------------------------------------------------------------
+function file_path = write_cylinder_output_file(out_folder, h_mm, r_mm, location, axis, val_mm, t_vec, beddy_uT)
+% write_cylinder_output_file  Write a tab-separated cylinder time/Beddy data file.
+
+    if numel(t_vec) ~= numel(beddy_uT)
+        error('write_cylinder_output_file:LengthMismatch', ...
+            't_vec and beddy_uT must have the same number of elements.');
+    end
+
+    loc_folder = fullfile(out_folder, location);
+    if ~exist(loc_folder, 'dir')
+        mkdir(loc_folder);
+    end
+
+    file_path = compose_cylinder_output_file_path(out_folder, h_mm, r_mm, location, axis, val_mm);
+
+    fid = fopen(file_path, 'w');
+    if fid < 0
+        error('write_cylinder_output_file:OpenFailed', 'Could not open file for writing: %s', file_path);
+    end
+
+    cleanup_obj = onCleanup(@() fclose(fid)); %#ok<NASGU>
+
+    fprintf(fid, '%s\tBeddy_uT\n', infer_time_header_label(t_vec));
+    for k = 1:numel(t_vec)
+        fprintf(fid, '%.16g\t%.16g\n', t_vec(k), beddy_uT(k));
+    end
+end
+
+% --------------------------------------------------------------------------
+function set_cylinder_geometry_params(model, radius_mm, height_mm)
+% set_cylinder_geometry_params  Set R_phantom and h_phantom from mm inputs.
+    set_single_param(model, 'R_phantom', radius_mm * 1e-3);
+    set_single_param(model, 'h_phantom', height_mm * 1e-3);
+end
+
+% --------------------------------------------------------------------------
+function set_cylinder_position_params(model, x_m, y_m, z_m)
+% set_cylinder_position_params  Set h_phantom_offset_* COMSOL parameters in metres.
+    set_single_param(model, 'h_phantom_offset_x', x_m);
+    set_single_param(model, 'h_phantom_offset_y', y_m);
+    set_single_param(model, 'h_phantom_offset_z', z_m);
+end
+
+% --------------------------------------------------------------------------
+function set_cylinder_position_for_location(model, loc_name, axis_name, offset_mm)
+% set_cylinder_position_for_location  Place the cylinder at one canonical location.
+    locations = get_point_locations();
+    match_idx = [];
+    for i = 1:numel(locations)
+        if strcmp(locations(i).name, loc_name)
+            match_idx = i;
+            break;
+        end
+    end
+    if isempty(match_idx)
+        error('set_cylinder_position_for_location:UnknownLocation', ...
+            'Unknown location "%s".', loc_name);
+    end
+
+    loc = locations(match_idx);
+    x_m = loc.x;
+    y_m = loc.y;
+    z_m = loc.z;
+
+    if ~isempty(axis_name) && ~isempty(offset_mm)
+        offset_m = offset_mm * 1e-3;
+        switch upper(axis_name)
+            case 'X'
+                x_m = x_m + offset_m;
+            case 'Y'
+                y_m = y_m + offset_m;
+            case 'Z'
+                z_m = z_m + offset_m;
+            otherwise
+                error('set_cylinder_position_for_location:InvalidAxis', ...
+                    'Unsupported axis "%s".', axis_name);
+        end
+    end
+
+    set_cylinder_position_params(model, x_m, y_m, z_m);
+end
+
+% --------------------------------------------------------------------------
+function refresh_cylinder_geometry_and_solutions(model, ref_sol_id, comp_sol_id)
+% refresh_cylinder_geometry_and_solutions  Rebuild geometry and refresh both solutions.
+    model.component('comp2').geom('geom2').runPre('fin');
+
+    if ~isempty(strtrim(ref_sol_id))
+        model.sol(ref_sol_id).updateSolution;
+    end
+    if ~isempty(strtrim(comp_sol_id))
+        model.sol(comp_sol_id).updateSolution;
+    end
+end
+
+% --------------------------------------------------------------------------
+function dataset_tag = resolve_cylinder_dataset_tag(model, comp_sol_id)
+% resolve_cylinder_dataset_tag  Find the comp2 volume dataset for AvVolume extraction.
+    dataset_tag = '';
+    fallback_comp2_tag = '';
+
+    try
+        dataset_tags = cell(model.result.dataset.tags);
+    catch
+        dataset_tags = {};
+    end
+
+    for i = 1:numel(dataset_tags)
+        tag = char(dataset_tags{i});
+        ds = [];
+        try
+            ds = model.result.dataset(tag);
+        catch
+            continue;
+        end
+
+        comp_val = '';
+        try
+            comp_val = char(ds.getString('comp'));
+        catch
+        end
+        if ~strcmp(comp_val, 'comp2')
+            continue;
+        end
+
+        if isempty(fallback_comp2_tag)
+            fallback_comp2_tag = tag;
+        end
+
+        for p = 1:2
+            prop_names = {'solution', 'sol'};
+            try
+                sol_val = char(ds.getString(prop_names{p}));
+                if strcmp(strtrim(sol_val), comp_sol_id)
+                    dataset_tag = tag;
+                    return;
+                end
+            catch
+            end
+        end
+    end
+
+    if ~isempty(fallback_comp2_tag)
+        dataset_tag = fallback_comp2_tag;
+        return;
+    end
+
+    dataset_tag = resolve_solution_dataset_tag(model, comp_sol_id);
+end
+
+% --------------------------------------------------------------------------
+function [t_vec, beddy_uT] = extract_cylinder_data(model, dataset_tag, ref_sol_id, comp_sol_id, export_path)
+% extract_cylinder_data  Extract a cylinder volume-average time trace via AvVolume.
+
+    t_vec = [];
+    beddy_uT = [];
+
+    reference_sol_id = strtrim(ref_sol_id);
+    if isempty(reference_sol_id)
+        reference_sol_id = strtrim(comp_sol_id);
+    end
+
+    expr = sprintf(['comp1.genext1((mf.By))-withsol(''%s'',comp1.genext1((mf.By)),setval(t,t))'], ...
+        reference_sol_id);
+
+    ensure_cylinder_volume_export(model, dataset_tag, expr, export_path);
+    [t_vec, beddy_uT] = read_comsol_point_export(export_path);
+
+    if isempty(t_vec) || isempty(beddy_uT)
+        error('extract_cylinder_data:EvaluationFailed', ...
+            'COMSOL export returned no valid cylinder volume-average data for dataset %s.', dataset_tag);
+    end
+end
+
+% --------------------------------------------------------------------------
+function ensure_cylinder_volume_export(model, dataset_tag, expr, export_path)
+% ensure_cylinder_volume_export  Configure AvVolume + table plot export workflow.
+
+    if exist(export_path, 'file')
+        delete(export_path);
+    end
+
+    try
+        numerical_tags = cell(model.result.numerical.tags);
+    catch
+        numerical_tags = {};
+    end
+    if ~any(strcmp(numerical_tags, 'av2'))
+        model.result.numerical.create('av2', 'AvVolume');
+    end
+
+    model.result.numerical('av2').set('data', dataset_tag);
+    model.result.numerical('av2').setIndex('expr', expr, 0);
+    model.result.numerical('av2').selection.all;
+    model.result.numerical('av2').setIndex('unit', 'uT', 0);
+
+    try
+        table_tags = cell(model.result.table.tags);
+    catch
+        table_tags = {};
+    end
+    if ~any(strcmp(table_tags, 'tbl25'))
+        model.result.table.create('tbl25', 'Table');
+        try
+            model.result.table('tbl25').comments('Volume Average 2');
+        catch
+        end
+    end
+
+    try
+        model.result.table('tbl25').clearTableData;
+    catch
+    end
+
+    model.result.numerical('av2').set('table', 'tbl25');
+    model.result.numerical('av2').setResult;
+
+    try
+        result_tags = cell(model.result.tags);
+    catch
+        result_tags = {};
+    end
+    if ~any(strcmp(result_tags, 'pg27'))
+        model.result.create('pg27', 'PlotGroup1D');
+    end
+    model.result('pg27').set('data', 'none');
+
+    try
+        feature_tags = cell(model.result('pg27').feature.tags);
+    catch
+        feature_tags = {};
+    end
+    if ~any(strcmp(feature_tags, 'tblp1'))
+        model.result('pg27').create('tblp1', 'Table');
+    end
+
+    model.result('pg27').feature('tblp1').set('source', 'table');
+    model.result('pg27').feature('tblp1').set('table', 'tbl25');
+    model.result('pg27').feature('tblp1').set('linewidth', 'preference');
+    model.result('pg27').feature('tblp1').set('markerpos', 'datapoints');
+    model.result('pg27').run;
+
+    try
+        export_tags = cell(model.result.export.tags);
+    catch
+        export_tags = {};
+    end
+    if ~any(strcmp(export_tags, 'plot7'))
+        model.result.export.create('plot7', 'pg27', 'tblp1', 'Plot');
+    end
+
+    model.result.export('plot7').set('filename', export_path);
+    model.result.export('plot7').run;
 end

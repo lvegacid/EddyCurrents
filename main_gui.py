@@ -34,7 +34,8 @@ from PyQt5.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QFileDialog,
     QComboBox, QMessageBox, QListWidget, QListWidgetItem, QInputDialog,
     QScrollArea, QCheckBox, QRubberBand, QDialog, QGroupBox,
-    QSpinBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem
+    QSpinBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem,
+    QAbstractItemView,
 )
 from PyQt5.QtGui import QPixmap, QKeySequence
 from PyQt5.QtCore import Qt, QSettings, QPoint, QRect
@@ -47,6 +48,7 @@ from analysis.measured_analysis import (
 )
 from analysis.compare_with_simulation import compare_with_simulation, load_measured_table
 from analysis.sequence_analysis import sequenceAnalysis
+from simulation_loader import TimeDomainSimulationLoader
 
 
 class FileList(QListWidget):
@@ -710,6 +712,40 @@ class ZoomLabel(QLabel):
         super().setPixmap(scaled)
 
 
+class _SimulationOffsetSelectionDialog(QDialog):
+    def __init__(self, offset_keys, selected_offsets=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select simulation offsets")
+        self.resize(360, 420)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Select one or more simulation offsets:"))
+
+        self.offset_list = QListWidget()
+        self.offset_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        for key in offset_keys:
+            item = QListWidgetItem(str(key))
+            self.offset_list.addItem(item)
+            if key in set(selected_offsets or []):
+                item.setSelected(True)
+        layout.addWidget(self.offset_list)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self.accept)
+        btn_row.addWidget(ok_btn)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+    def selected_offsets(self):
+        return [item.text().strip() for item in self.offset_list.selectedItems() if item.text().strip()]
+
+
 # =========================================================
 # MAIN GUI
 # =========================================================
@@ -738,6 +774,11 @@ class EddyCurrentGUI(QWidget):
         self.current_analysis_table_frames = None
         self.current_analysis_table_filename = None
         self.current_analysis_table_dialog = None
+        self._time_domain_sim_loader = TimeDomainSimulationLoader()
+        self._time_domain_sim_overlay_enabled = False
+        self._time_domain_sim_offset_mode = "none"
+        self._time_domain_sim_selected_offsets = []
+        self._time_domain_simulation_warning_buffer = []
 
         # create layouts first; widgets will follow
         main_layout = QVBoxLayout()
@@ -1073,6 +1114,23 @@ class EddyCurrentGUI(QWidget):
         reset_zoom_btn.clicked.connect(self.reset_zoom)
         analyze_row.addWidget(reset_zoom_btn)
 
+        sim_compare_row = QHBoxLayout()
+        analyze_group_layout.addLayout(sim_compare_row)
+
+        self.time_domain_sim_compare_checkbox = QCheckBox("Compare with time-domain simulations")
+        self.time_domain_sim_compare_checkbox.setChecked(False)
+        self.time_domain_sim_compare_checkbox.toggled.connect(self.update_time_domain_sim_controls)
+        sim_compare_row.addWidget(self.time_domain_sim_compare_checkbox)
+
+        self.time_domain_sim_offsets_btn = QPushButton("Simulation offsets...")
+        self.time_domain_sim_offsets_btn.clicked.connect(self.configure_time_domain_simulation_offsets)
+        sim_compare_row.addWidget(self.time_domain_sim_offsets_btn)
+
+        self.time_domain_sim_offsets_status = QLabel("No offsets")
+        self.time_domain_sim_offsets_status.setStyleSheet("color: #666;")
+        sim_compare_row.addWidget(self.time_domain_sim_offsets_status)
+        sim_compare_row.addStretch()
+
         compare_label = QLabel("Single-value analysis")
         compare_label.setStyleSheet("font-weight: bold; color: blue;")
         analyze_group_layout.addWidget(compare_label)
@@ -1152,6 +1210,7 @@ class EddyCurrentGUI(QWidget):
 
         self.compare_with_sim_checkbox.toggled.connect(self.update_single_value_sim_controls)
         self.update_single_value_sim_controls()
+        self.update_time_domain_sim_controls()
 
         # Keep measured-column options in sync with the selected measured table.
         self.setup_combo.currentIndexChanged.connect(self._refresh_compare_measured_columns)
@@ -2307,6 +2366,175 @@ class EddyCurrentGUI(QWidget):
             w.setEnabled(enabled)
 
         self._update_compare_gradient_options(enabled)
+
+    def update_time_domain_sim_controls(self):
+        enabled = bool(
+            getattr(self, "time_domain_sim_compare_checkbox", None)
+            and self.time_domain_sim_compare_checkbox.isChecked()
+        )
+        self._time_domain_sim_overlay_enabled = enabled
+
+        for w in [
+            getattr(self, "time_domain_sim_offsets_btn", None),
+            getattr(self, "time_domain_sim_offsets_status", None),
+        ]:
+            if w is None:
+                continue
+            w.setVisible(enabled)
+            w.setEnabled(enabled)
+
+        if enabled:
+            self._update_time_domain_offsets_status()
+
+    def configure_time_domain_simulation_offsets(self):
+        if not self._time_domain_sim_overlay_enabled:
+            return
+
+        setup_name = self.setup_combo.currentText().strip() if hasattr(self, "setup_combo") else ""
+        available_offsets = self._time_domain_sim_loader.detect_available_offsets(setup_name)
+
+        mode_label, ok = QInputDialog.getItem(
+            self,
+            "Simulation offsets",
+            "Offset mode:",
+            ["No offsets", "Select offsets", "All offsets"],
+            0,
+            False,
+        )
+        if not ok:
+            return
+
+        if mode_label == "No offsets":
+            self._time_domain_sim_offset_mode = "none"
+            self._time_domain_sim_selected_offsets = []
+            self._update_time_domain_offsets_status()
+            return
+
+        if mode_label == "All offsets":
+            self._time_domain_sim_offset_mode = "all"
+            self._time_domain_sim_selected_offsets = list(available_offsets)
+            self._update_time_domain_offsets_status()
+            if not available_offsets:
+                QMessageBox.information(
+                    self,
+                    "Simulation offsets",
+                    f"No simulation offset files found for {setup_name or 'the selected setup'}.",
+                )
+            return
+
+        if not available_offsets:
+            QMessageBox.information(
+                self,
+                "Simulation offsets",
+                f"No simulation offset files found for {setup_name or 'the selected setup'}.",
+            )
+            self._time_domain_sim_offset_mode = "none"
+            self._time_domain_sim_selected_offsets = []
+            self._update_time_domain_offsets_status()
+            return
+
+        dlg = _SimulationOffsetSelectionDialog(
+            available_offsets,
+            selected_offsets=self._time_domain_sim_selected_offsets,
+            parent=self,
+        )
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        selected = dlg.selected_offsets()
+        if not selected:
+            self._time_domain_sim_offset_mode = "none"
+            self._time_domain_sim_selected_offsets = []
+        else:
+            self._time_domain_sim_offset_mode = "selected"
+            self._time_domain_sim_selected_offsets = list(selected)
+        self._update_time_domain_offsets_status()
+
+    def _update_time_domain_offsets_status(self):
+        label = getattr(self, "time_domain_sim_offsets_status", None)
+        if label is None:
+            return
+
+        mode = str(getattr(self, "_time_domain_sim_offset_mode", "none")).lower()
+        selected = list(getattr(self, "_time_domain_sim_selected_offsets", []))
+        if mode == "all":
+            text = "All offsets"
+        elif mode == "selected" and selected:
+            text = ", ".join(selected)
+        else:
+            text = "No offsets"
+        label.setText(text)
+
+    def _time_domain_simulation_overlay_requested(self):
+        return bool(getattr(self, "_time_domain_sim_overlay_enabled", False))
+
+    def _load_time_domain_simulation_overlays(self, cases, gradients, locations):
+        overlays_by_setup = {}
+        warnings = []
+
+        offset_mode = str(getattr(self, "_time_domain_sim_offset_mode", "none")).lower()
+        selected_offsets = list(getattr(self, "_time_domain_sim_selected_offsets", []))
+
+        for case in cases:
+            setup_name = str(case.get("setup", "")).strip()
+            if not setup_name or setup_name in overlays_by_setup:
+                continue
+            payload = self._time_domain_sim_loader.load_plot_ready_data(
+                setup_name=setup_name,
+                gradients=gradients,
+                locations=locations,
+                offset_mode=offset_mode,
+                selected_offsets=selected_offsets,
+            )
+            overlays_by_setup[setup_name] = payload
+            warnings.extend(payload.get("warnings", []))
+
+        self._time_domain_simulation_warning_buffer = self._dedupe_texts(warnings)
+        return overlays_by_setup
+
+    def _dedupe_texts(self, texts):
+        seen = set()
+        ordered = []
+        for text in texts:
+            text = str(text).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            ordered.append(text)
+        return ordered
+
+    def _offset_overlay_color_map(self, offset_keys):
+        unique_keys = [key for key in self._dedupe_texts(offset_keys) if key]
+        if not unique_keys:
+            return {}
+        import matplotlib.cm as cm
+
+        cmap = cm.get_cmap("tab10", max(1, len(unique_keys)))
+        return {key: cmap(idx) for idx, key in enumerate(unique_keys)}
+
+    def _plot_time_domain_simulation_curves(self, ax, curves, measured_color, offset_color_map, linewidth=1.4):
+        for curve in curves:
+            offset_key = curve.get("offset_key")
+            line_color = measured_color if not offset_key else offset_color_map.get(offset_key, measured_color)
+            ax.plot(
+                np.asarray(curve.get("time_ms", []), dtype=float),
+                np.asarray(curve.get("values", []), dtype=float),
+                "--",
+                linewidth=linewidth,
+                color=line_color,
+                alpha=0.95,
+                label=curve.get("label", "Sim"),
+            )
+
+    def _show_time_domain_simulation_warnings(self):
+        warnings = list(getattr(self, "_time_domain_simulation_warning_buffer", []))
+        self._time_domain_simulation_warning_buffer = []
+        if not warnings:
+            return
+        message = "\n".join(warnings[:12])
+        if len(warnings) > 12:
+            message += f"\n... and {len(warnings) - 12} more"
+        QMessageBox.warning(self, "Time-domain simulations", message)
 
     def _update_compare_gradient_options(self, compare_with_sim):
         combo = getattr(self, "compare_grad_combo", None)
@@ -4815,6 +5043,25 @@ class EddyCurrentGUI(QWidget):
         else:
             ndelay_selected = int(ndelay)
 
+        sim_overlays_by_setup = {}
+        sim_offset_colors = {}
+        if self._time_domain_simulation_overlay_requested():
+            requested_gradients = ["GX", "GY", "GZ"] if gradient == "All" else [str(gradient).strip().upper()]
+            requested_locations = [self._canonical_phantom_position(case.get("phantom", "Center")) for case in cases]
+            sim_overlays_by_setup = self._load_time_domain_simulation_overlays(
+                cases=cases,
+                gradients=requested_gradients,
+                locations=requested_locations,
+            )
+            all_offset_keys = []
+            for payload in sim_overlays_by_setup.values():
+                for grad_map in payload.get("curves", {}).values():
+                    for curve_list in grad_map.values():
+                        all_offset_keys.extend(
+                            curve.get("offset_key") for curve in curve_list if curve.get("offset_key")
+                        )
+            sim_offset_colors = self._offset_overlay_color_map(all_offset_keys)
+
         if use_subplots and gradient == "All":
             fig, axes = plt.subplots(1, 3, figsize=(18, 5))
             fig.subplots_adjust(wspace=0.35)
@@ -4981,6 +5228,23 @@ class EddyCurrentGUI(QWidget):
                         else:
                             current_ax.plot(tiempo_corr, BeddyFitted[n, :], '-', color=color, alpha=0.8)
 
+                if sim_overlays_by_setup:
+                    gradient_token = f"G{g.upper()}"
+                    payload = sim_overlays_by_setup.get(case_setup, {})
+                    sim_curves = (
+                        payload.get("curves", {})
+                        .get(gradient_token, {})
+                        .get(self._canonical_phantom_position(case_phantom), [])
+                    )
+                    if sim_curves:
+                        self._plot_time_domain_simulation_curves(
+                            current_ax,
+                            sim_curves,
+                            measured_color=color,
+                            offset_color_map=sim_offset_colors,
+                            linewidth=1.3,
+                        )
+
         if axes is not None:
             grad_names = ['GX', 'GY', 'GZ']
             for i, ax in enumerate(axes):
@@ -5051,6 +5315,24 @@ class EddyCurrentGUI(QWidget):
             ndelay_selected = "all"
         else:
             ndelay_selected = int(ndelay)
+
+        sim_overlays_by_setup = {}
+        sim_offset_colors = {}
+        if self._time_domain_simulation_overlay_requested():
+            requested_gradients = ["GX", "GY", "GZ"] if gradient == "All" else [str(gradient).strip().upper()]
+            sim_overlays_by_setup = self._load_time_domain_simulation_overlays(
+                cases=cases,
+                gradients=requested_gradients,
+                locations=positions,
+            )
+            all_offset_keys = []
+            for payload in sim_overlays_by_setup.values():
+                for grad_map in payload.get("curves", {}).values():
+                    for curve_list in grad_map.values():
+                        all_offset_keys.extend(
+                            curve.get("offset_key") for curve in curve_list if curve.get("offset_key")
+                        )
+            sim_offset_colors = self._offset_overlay_color_map(all_offset_keys)
 
         if gradient == "All":
             fig, axes = plt.subplots(len(positions), 3, figsize=(18, 3 * len(positions)), squeeze=False)
@@ -5186,6 +5468,23 @@ class EddyCurrentGUI(QWidget):
                                 fitted_label_added = True
                             else:
                                 ax.plot(tiempo_corr, BeddyFitted[n, :], '-', color=color, alpha=0.8)
+
+                    if sim_overlays_by_setup:
+                        gradient_token = f"G{g.upper()}"
+                        payload = sim_overlays_by_setup.get(case_setup, {})
+                        sim_curves = (
+                            payload.get("curves", {})
+                            .get(gradient_token, {})
+                            .get(position, [])
+                        )
+                        if sim_curves:
+                            self._plot_time_domain_simulation_curves(
+                                ax,
+                                sim_curves,
+                                measured_color=color,
+                                offset_color_map=sim_offset_colors,
+                                linewidth=1.2,
+                            )
 
             if gradient == "All":
                 for g in ['x', 'y', 'z']:
@@ -5905,6 +6204,7 @@ class EddyCurrentGUI(QWidget):
 
                     # Table may have been updated; refresh available measured columns.
                     self._refresh_compare_measured_columns()
+                    self._show_time_domain_simulation_warnings()
                 
             elif plot_type == "FID":
                 if forced_all_phantoms:
