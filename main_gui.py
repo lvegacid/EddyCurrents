@@ -28,7 +28,6 @@ for _pkg in ["numpy", "scipy", "matplotlib", "pandas", "PyQt5", "scipy.io"]:
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
-
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QFileDialog,
@@ -48,7 +47,7 @@ from analysis.measured_analysis import (
 )
 from analysis.compare_with_simulation import compare_with_simulation, load_measured_table
 from analysis.sequence_analysis import sequenceAnalysis
-from simulation_loader import TimeDomainSimulationLoader
+from simulation_loader import TimeDomainSimulationLoader, CylinderTimeDomainLoader
 
 
 class FileList(QListWidget):
@@ -775,10 +774,20 @@ class EddyCurrentGUI(QWidget):
         self.current_analysis_table_filename = None
         self.current_analysis_table_dialog = None
         self._time_domain_sim_loader = TimeDomainSimulationLoader()
+        self._cylinder_sim_loader = CylinderTimeDomainLoader()
         self._time_domain_sim_overlay_enabled = False
         self._time_domain_sim_offset_mode = "none"
         self._time_domain_sim_selected_offsets = []
         self._time_domain_simulation_warning_buffer = []
+        # Sim overlay session – single source of truth for what is plotted.
+        # Plot resets it; Add appends to it; Clear empties it.
+        self._sim_overlay_session_cases = []       # list of spec dicts
+        self._sim_overlay_session_colormap = None  # chosen once at first Plot
+        # Plot session color counter for measured-data colormaps
+        self._plot_session_color_index = 0
+        # Colormap chosen for the current multi-case measured-data session.
+        # None means "no session yet → ask on next Plot".
+        self._multi_case_colormap = None
 
         # create layouts first; widgets will follow
         main_layout = QVBoxLayout()
@@ -1122,6 +1131,30 @@ class EddyCurrentGUI(QWidget):
         self.time_domain_sim_compare_checkbox.toggled.connect(self.update_time_domain_sim_controls)
         sim_compare_row.addWidget(self.time_domain_sim_compare_checkbox)
 
+        # Phantom Type selector (Point / Cylinder)
+        sim_compare_row.addSpacing(12)
+        sim_compare_row.addWidget(QLabel("Phantom Type:"))
+        self.sim_phantom_type_combo = QComboBox()
+        self.sim_phantom_type_combo.addItems(["Point", "Cylinder"])
+        self.sim_phantom_type_combo.setCurrentText("Point")
+        self.sim_phantom_type_combo.currentTextChanged.connect(self._on_sim_phantom_type_changed)
+        sim_compare_row.addWidget(self.sim_phantom_type_combo)
+
+        # H / R dropdowns – only visible in Cylinder mode
+        sim_compare_row.addSpacing(8)
+        self.sim_h_label = QLabel("H (mm):")
+        sim_compare_row.addWidget(self.sim_h_label)
+        self.sim_h_combo = QComboBox()
+        self.sim_h_combo.setMinimumWidth(60)
+        sim_compare_row.addWidget(self.sim_h_combo)
+
+        sim_compare_row.addSpacing(6)
+        self.sim_r_label = QLabel("R (mm):")
+        sim_compare_row.addWidget(self.sim_r_label)
+        self.sim_r_combo = QComboBox()
+        self.sim_r_combo.setMinimumWidth(60)
+        sim_compare_row.addWidget(self.sim_r_combo)
+
         self.time_domain_sim_offsets_btn = QPushButton("Simulation offsets...")
         self.time_domain_sim_offsets_btn.clicked.connect(self.configure_time_domain_simulation_offsets)
         sim_compare_row.addWidget(self.time_domain_sim_offsets_btn)
@@ -1129,7 +1162,27 @@ class EddyCurrentGUI(QWidget):
         self.time_domain_sim_offsets_status = QLabel("No offsets")
         self.time_domain_sim_offsets_status.setStyleSheet("color: #666;")
         sim_compare_row.addWidget(self.time_domain_sim_offsets_status)
+
+        sim_compare_row.addSpacing(12)
+        self.add_sim_case_btn = QPushButton("Add")
+        self.add_sim_case_btn.setToolTip("Add another simulation case to the overlay list")
+        self.add_sim_case_btn.clicked.connect(self._add_sim_overlay_case)
+        sim_compare_row.addWidget(self.add_sim_case_btn)
+
+        self.clear_sim_cases_btn = QPushButton("Clear")
+        self.clear_sim_cases_btn.setToolTip("Remove all accumulated simulation overlays")
+        self.clear_sim_cases_btn.clicked.connect(self._clear_sim_overlay_cases)
+        sim_compare_row.addWidget(self.clear_sim_cases_btn)
+
+        self.sim_cases_status = QLabel("")
+        self.sim_cases_status.setStyleSheet("color: #555; font-style: italic;")
+        sim_compare_row.addWidget(self.sim_cases_status)
+
         sim_compare_row.addStretch()
+
+        # Hide cylinder-only controls initially
+        for w in (self.sim_h_label, self.sim_h_combo, self.sim_r_label, self.sim_r_combo):
+            w.setVisible(False)
 
         compare_label = QLabel("Single-value analysis")
         compare_label.setStyleSheet("font-weight: bold; color: blue;")
@@ -2367,6 +2420,128 @@ class EddyCurrentGUI(QWidget):
 
         self._update_compare_gradient_options(enabled)
 
+    def _on_sim_phantom_type_changed(self, phantom_type):
+        """Show/hide H and R controls based on phantom type selection."""
+        is_cylinder = (phantom_type == "Cylinder")
+        for w in (self.sim_h_label, self.sim_h_combo, self.sim_r_label, self.sim_r_combo):
+            w.setVisible(is_cylinder)
+        if is_cylinder:
+            self._refresh_cylinder_hr_dropdowns()
+
+    def _refresh_cylinder_hr_dropdowns(self):
+        """Scan available Cylinder files and populate H/R dropdowns."""
+        setup_name = self.setup_combo.currentText().strip() if hasattr(self, "setup_combo") else ""
+        h_values, r_values = self._cylinder_sim_loader.detect_hr_values(setup_name)
+
+        prev_h = self.sim_h_combo.currentText()
+        prev_r = self.sim_r_combo.currentText()
+
+        self.sim_h_combo.blockSignals(True)
+        self.sim_r_combo.blockSignals(True)
+
+        self.sim_h_combo.clear()
+        self.sim_r_combo.clear()
+
+        if h_values:
+            self.sim_h_combo.addItems(h_values)
+            if prev_h in h_values:
+                self.sim_h_combo.setCurrentText(prev_h)
+        else:
+            self.sim_h_combo.addItem("(none)")
+
+        if r_values:
+            self.sim_r_combo.addItems(r_values)
+            if prev_r in r_values:
+                self.sim_r_combo.setCurrentText(prev_r)
+        else:
+            self.sim_r_combo.addItem("(none)")
+
+        self.sim_h_combo.blockSignals(False)
+        self.sim_r_combo.blockSignals(False)
+
+    def _active_sim_loader(self):
+        """Return the appropriate loader based on the selected phantom type."""
+        phantom_type = getattr(self, "sim_phantom_type_combo", None)
+        if phantom_type and phantom_type.currentText() == "Cylinder":
+            h_str = self.sim_h_combo.currentText().strip()
+            r_str = self.sim_r_combo.currentText().strip()
+            self._cylinder_sim_loader.set_selected_hr(h_str, r_str)
+            return self._cylinder_sim_loader
+        return self._time_domain_sim_loader
+
+    def _current_sim_case_spec(self):
+        """
+        Build a dict describing the currently configured sim overlay case,
+        including a dedicated loader instance already configured with H/R.
+        """
+        phantom_type = getattr(self, "sim_phantom_type_combo", None)
+        ptype = phantom_type.currentText() if phantom_type else "Point"
+        offset_mode = str(getattr(self, "_time_domain_sim_offset_mode", "none")).lower()
+        selected_offsets = list(getattr(self, "_time_domain_sim_selected_offsets", []))
+
+        if ptype == "Cylinder":
+            h_str = self.sim_h_combo.currentText().strip()
+            r_str = self.sim_r_combo.currentText().strip()
+            loader = CylinderTimeDomainLoader(
+                simulation_root=self._cylinder_sim_loader.simulation_root,
+                time_zero_ms=self._cylinder_sim_loader.time_zero_ms,
+            )
+            loader.set_selected_hr(h_str, r_str)
+            h_label = loader._compact_number(h_str) if h_str not in ("", "(none)") else "?"
+            r_label = loader._compact_number(r_str) if r_str not in ("", "(none)") else "?"
+        else:
+            loader = self._time_domain_sim_loader
+            h_label = ""
+            r_label = ""
+
+        return {
+            "phantom_type": ptype,
+            "h": h_label,
+            "r": r_label,
+            "offset_mode": offset_mode,
+            "selected_offsets": selected_offsets,
+            "loader": loader,
+        }
+
+    def _add_sim_overlay_case(self):
+        """Append current sim selection to the session (deduplicated). No re-plot, no colormap dialog."""
+        if not self._time_domain_sim_overlay_enabled:
+            return
+        spec = self._current_sim_case_spec()
+
+        def _key(s):
+            return (
+                s.get("phantom_type"),
+                s.get("h"),
+                s.get("r"),
+                s.get("offset_mode"),
+                tuple(sorted(s.get("selected_offsets", []))),
+            )
+
+        existing_keys = {_key(c) for c in self._sim_overlay_session_cases}
+        if _key(spec) not in existing_keys:
+            self._sim_overlay_session_cases.append(spec)
+
+        self._update_sim_cases_status()
+
+    def _clear_sim_overlay_cases(self):
+        """Remove all sim overlay cases and reset session colormap."""
+        self._sim_overlay_session_cases = []
+        self._sim_overlay_session_colormap = None
+        self._update_sim_cases_status()
+
+    def _update_sim_cases_status(self):
+        label = getattr(self, "sim_cases_status", None)
+        if label is None:
+            return
+        n = len(self._sim_overlay_session_cases)
+        if n == 0:
+            label.setText("")
+        elif n == 1:
+            label.setText("1 sim case")
+        else:
+            label.setText(f"{n} sim cases")
+
     def update_time_domain_sim_controls(self):
         enabled = bool(
             getattr(self, "time_domain_sim_compare_checkbox", None)
@@ -2391,7 +2566,8 @@ class EddyCurrentGUI(QWidget):
             return
 
         setup_name = self.setup_combo.currentText().strip() if hasattr(self, "setup_combo") else ""
-        available_offsets = self._time_domain_sim_loader.detect_available_offsets(setup_name)
+        loader = self._active_sim_loader()
+        available_offsets = loader.detect_available_offsets(setup_name)
 
         mode_label, ok = QInputDialog.getItem(
             self,
@@ -2469,28 +2645,51 @@ class EddyCurrentGUI(QWidget):
         return bool(getattr(self, "_time_domain_sim_overlay_enabled", False))
 
     def _load_time_domain_simulation_overlays(self, cases, gradients, locations):
-        overlays_by_setup = {}
+        """
+        Load sim overlay curves for all cases in the session.
+        If the session is empty but the overlay is enabled, auto-populate it
+        from the current UI selection so the first Plot Just Works.
+        Returns [] if overlay is not enabled.
+        """
+        if not self._time_domain_simulation_overlay_requested():
+            return []
+
+        # Auto-seed: if no cases have been added yet, treat the current UI
+        # selection as the one case to show (without permanently storing it,
+        # so the user can still use Add/Clear freely afterwards).
+        specs = list(self._sim_overlay_session_cases)
+        if not specs:
+            specs = [self._current_sim_case_spec()]
+
         warnings = []
+        all_payloads = []
+        for spec in specs:
+            loader = spec["loader"]
+            offset_mode = spec["offset_mode"]
+            selected_offsets = spec["selected_offsets"]
 
-        offset_mode = str(getattr(self, "_time_domain_sim_offset_mode", "none")).lower()
-        selected_offsets = list(getattr(self, "_time_domain_sim_selected_offsets", []))
+            per_setup = {}
+            for case in cases:
+                setup_name = str(case.get("setup", "")).strip()
+                if not setup_name or setup_name in per_setup:
+                    continue
+                payload = loader.load_plot_ready_data(
+                    setup_name=setup_name,
+                    gradients=gradients,
+                    locations=locations,
+                    offset_mode=offset_mode,
+                    selected_offsets=selected_offsets,
+                )
+                per_setup[setup_name] = payload
+                warnings.extend(payload.get("warnings", []))
 
-        for case in cases:
-            setup_name = str(case.get("setup", "")).strip()
-            if not setup_name or setup_name in overlays_by_setup:
-                continue
-            payload = self._time_domain_sim_loader.load_plot_ready_data(
-                setup_name=setup_name,
-                gradients=gradients,
-                locations=locations,
-                offset_mode=offset_mode,
-                selected_offsets=selected_offsets,
-            )
-            overlays_by_setup[setup_name] = payload
-            warnings.extend(payload.get("warnings", []))
+            # Attach spec metadata so the plotting code can build labels
+            for setup_name, payload in per_setup.items():
+                payload["_spec"] = spec
+            all_payloads.append(per_setup)
 
         self._time_domain_simulation_warning_buffer = self._dedupe_texts(warnings)
-        return overlays_by_setup
+        return all_payloads
 
     def _dedupe_texts(self, texts):
         seen = set()
@@ -2512,18 +2711,46 @@ class EddyCurrentGUI(QWidget):
         cmap = cm.get_cmap("tab10", max(1, len(unique_keys)))
         return {key: cmap(idx) for idx, key in enumerate(unique_keys)}
 
-    def _plot_time_domain_simulation_curves(self, ax, curves, measured_color, offset_color_map, linewidth=1.4):
+    @staticmethod
+    def _sim_legend_label(spec, offset_key):
+        """
+        Build the legend label for a simulation curve per the required format:
+          Point:    sim_point  /  sim_point_offset<N>
+          Cylinder: sim_cil_radius<R>_height<H>  /  sim_cil_radius<R>_height<H>_offset<N>
+        """
+        ptype = str(spec.get("phantom_type", "Point")) if spec else "Point"
+        offset_suffix = ""
+        if offset_key:
+            m = re.match(r"Offset_[XYZ]_(-?\d+(?:\.\d+)?)mm", str(offset_key), re.IGNORECASE)
+            if m:
+                val = m.group(1)
+                try:
+                    fval = float(val)
+                    val = str(int(fval)) if fval == int(fval) else f"{fval:g}"
+                except Exception:
+                    pass
+                offset_suffix = f"_offset{val}"
+        if ptype == "Cylinder":
+            r = spec.get("r", "?")
+            h = spec.get("h", "?")
+            return f"sim_cil_radius{r}_height{h}{offset_suffix}"
+        return f"sim_point{offset_suffix}"
+
+    def _plot_time_domain_simulation_curves(self, ax, curves, measured_color, offset_color_map, linewidth=1.4, spec=None):
+        is_cylinder = (spec or {}).get("phantom_type", "Point") == "Cylinder"
+        linestyle = "--" if is_cylinder else "-."
         for curve in curves:
             offset_key = curve.get("offset_key")
             line_color = measured_color if not offset_key else offset_color_map.get(offset_key, measured_color)
+            label = self._sim_legend_label(spec, offset_key)
             ax.plot(
                 np.asarray(curve.get("time_ms", []), dtype=float),
                 np.asarray(curve.get("values", []), dtype=float),
-                "--",
+                linestyle,
                 linewidth=linewidth,
                 color=line_color,
                 alpha=0.95,
-                label=curve.get("label", "Sim"),
+                label=label,
             )
 
     def _show_time_domain_simulation_warnings(self):
@@ -4998,6 +5225,33 @@ class EddyCurrentGUI(QWidget):
 
         return os.path.normpath(candidates[0])
 
+    def _make_palette_colors(self, n_cases, colormap):
+        """
+        Return a list of n_cases RGBA colors sampled from `colormap`, starting
+        at self._plot_session_color_index and advancing it so the next call
+        continues from the next free slot.
+
+        Returns None for "Single-color gradient" (callers use per-axis tinting).
+        """
+        KNOWN = ("Viridis", "Inferno", "Plasma", "Magma", "Cividis")
+        if colormap not in KNOWN or n_cases == 0:
+            return None
+        import matplotlib.cm as cm
+        cmap = cm.get_cmap(colormap.lower())
+        upper = 0.70 if colormap == "Inferno" else 0.85
+        # Use a virtual palette of 32 slots so colors spread nicely
+        SLOTS = 32
+        start = self._plot_session_color_index
+        positions = [((start + i) % SLOTS) / SLOTS * upper for i in range(n_cases)]
+        self._plot_session_color_index = (start + n_cases) % SLOTS
+        return [cmap(p) for p in positions]
+
+    def _reset_plot_session(self):
+        """Reset the sim overlay session and measured-data color counter."""
+        self._sim_overlay_session_cases = []
+        self._sim_overlay_session_colormap = None
+        self._plot_session_color_index = 0
+
     def _run_beddy_multi_case(
         self,
         cases,
@@ -5020,16 +5274,7 @@ class EddyCurrentGUI(QWidget):
             'z': 'darkgreen'
         }
 
-        palette_colors = None
-        if colormap in ("Viridis", "Inferno") and len(cases) > 0:
-            import matplotlib.cm as cm
-            cmap = cm.get_cmap(colormap.lower())
-            # For Inferno, cap the upper end at 0.70 so the lightest colour
-            # keeps enough contrast against a white background.
-            # For Viridis, 0.85 is fine (ends in green, not yellow).
-            upper = 0.70 if colormap == "Inferno" else 0.85
-            sample_range = np.linspace(0.0, upper, len(cases))
-            palette_colors = [cmap(pos) for pos in sample_range]
+        palette_colors = self._make_palette_colors(len(cases), colormap)
 
         include_fitted_legend = bool(apply_filter)
 
@@ -5043,23 +5288,24 @@ class EddyCurrentGUI(QWidget):
         else:
             ndelay_selected = int(ndelay)
 
-        sim_overlays_by_setup = {}
+        sim_overlays_list = []   # list of per-setup dicts, one per accumulated spec
         sim_offset_colors = {}
         if self._time_domain_simulation_overlay_requested():
-            requested_gradients = ["GX", "GY", "GZ"] if gradient == "All" else [str(gradient).strip().upper()]
+            requested_gradients = ["GX", "GY", "GZ"] if gradient == "All" else [f"G{gradient[-1].upper()}"]
             requested_locations = [self._canonical_phantom_position(case.get("phantom", "Center")) for case in cases]
-            sim_overlays_by_setup = self._load_time_domain_simulation_overlays(
+            sim_overlays_list = self._load_time_domain_simulation_overlays(
                 cases=cases,
                 gradients=requested_gradients,
                 locations=requested_locations,
             )
             all_offset_keys = []
-            for payload in sim_overlays_by_setup.values():
-                for grad_map in payload.get("curves", {}).values():
-                    for curve_list in grad_map.values():
-                        all_offset_keys.extend(
-                            curve.get("offset_key") for curve in curve_list if curve.get("offset_key")
-                        )
+            for per_setup in sim_overlays_list:
+                for payload in per_setup.values():
+                    for grad_map in payload.get("curves", {}).values():
+                        for curve_list in grad_map.values():
+                            all_offset_keys.extend(
+                                curve.get("offset_key") for curve in curve_list if curve.get("offset_key")
+                            )
             sim_offset_colors = self._offset_overlay_color_map(all_offset_keys)
 
         if use_subplots and gradient == "All":
@@ -5228,22 +5474,24 @@ class EddyCurrentGUI(QWidget):
                         else:
                             current_ax.plot(tiempo_corr, BeddyFitted[n, :], '-', color=color, alpha=0.8)
 
-                if sim_overlays_by_setup:
+                if sim_overlays_list:
                     gradient_token = f"G{g.upper()}"
-                    payload = sim_overlays_by_setup.get(case_setup, {})
-                    sim_curves = (
-                        payload.get("curves", {})
-                        .get(gradient_token, {})
-                        .get(self._canonical_phantom_position(case_phantom), [])
-                    )
-                    if sim_curves:
-                        self._plot_time_domain_simulation_curves(
-                            current_ax,
-                            sim_curves,
-                            measured_color=color,
-                            offset_color_map=sim_offset_colors,
-                            linewidth=1.3,
+                    for per_setup in sim_overlays_list:
+                        payload = per_setup.get(case_setup, {})
+                        sim_curves = (
+                            payload.get("curves", {})
+                            .get(gradient_token, {})
+                            .get(self._canonical_phantom_position(case_phantom), [])
                         )
+                        if sim_curves:
+                            self._plot_time_domain_simulation_curves(
+                                current_ax,
+                                sim_curves,
+                                measured_color=color,
+                                offset_color_map=sim_offset_colors,
+                                linewidth=1.3,
+                                spec=payload.get("_spec"),
+                            )
 
         if axes is not None:
             grad_names = ['GX', 'GY', 'GZ']
@@ -5296,13 +5544,7 @@ class EddyCurrentGUI(QWidget):
         positions = ["Center", "+X", "-X", "+Y", "-Y", "+Z", "-Z"]
         base_colors = {'x': 'midnightblue', 'y': 'darkred', 'z': 'darkgreen'}
 
-        palette_colors = None
-        if colormap in ("Viridis", "Inferno") and len(cases) > 0:
-            import matplotlib.cm as cm
-            cmap = cm.get_cmap(colormap.lower())
-            upper = 0.70 if colormap == "Inferno" else 0.85
-            sample_range = np.linspace(0.0, upper, len(cases))
-            palette_colors = [cmap(pos) for pos in sample_range]
+        palette_colors = self._make_palette_colors(len(cases), colormap)
 
         include_fitted_legend = bool(apply_filter)
 
@@ -5316,22 +5558,23 @@ class EddyCurrentGUI(QWidget):
         else:
             ndelay_selected = int(ndelay)
 
-        sim_overlays_by_setup = {}
+        sim_overlays_list = []
         sim_offset_colors = {}
         if self._time_domain_simulation_overlay_requested():
-            requested_gradients = ["GX", "GY", "GZ"] if gradient == "All" else [str(gradient).strip().upper()]
-            sim_overlays_by_setup = self._load_time_domain_simulation_overlays(
+            requested_gradients = ["GX", "GY", "GZ"] if gradient == "All" else [f"G{gradient[-1].upper()}"]
+            sim_overlays_list = self._load_time_domain_simulation_overlays(
                 cases=cases,
                 gradients=requested_gradients,
                 locations=positions,
             )
             all_offset_keys = []
-            for payload in sim_overlays_by_setup.values():
-                for grad_map in payload.get("curves", {}).values():
-                    for curve_list in grad_map.values():
-                        all_offset_keys.extend(
-                            curve.get("offset_key") for curve in curve_list if curve.get("offset_key")
-                        )
+            for per_setup in sim_overlays_list:
+                for payload in per_setup.values():
+                    for grad_map in payload.get("curves", {}).values():
+                        for curve_list in grad_map.values():
+                            all_offset_keys.extend(
+                                curve.get("offset_key") for curve in curve_list if curve.get("offset_key")
+                            )
             sim_offset_colors = self._offset_overlay_color_map(all_offset_keys)
 
         if gradient == "All":
@@ -5469,22 +5712,24 @@ class EddyCurrentGUI(QWidget):
                             else:
                                 ax.plot(tiempo_corr, BeddyFitted[n, :], '-', color=color, alpha=0.8)
 
-                    if sim_overlays_by_setup:
+                    if sim_overlays_list:
                         gradient_token = f"G{g.upper()}"
-                        payload = sim_overlays_by_setup.get(case_setup, {})
-                        sim_curves = (
-                            payload.get("curves", {})
-                            .get(gradient_token, {})
-                            .get(position, [])
-                        )
-                        if sim_curves:
-                            self._plot_time_domain_simulation_curves(
-                                ax,
-                                sim_curves,
-                                measured_color=color,
-                                offset_color_map=sim_offset_colors,
-                                linewidth=1.2,
+                        for per_setup in sim_overlays_list:
+                            payload = per_setup.get(case_setup, {})
+                            sim_curves = (
+                                payload.get("curves", {})
+                                .get(gradient_token, {})
+                                .get(position, [])
                             )
+                            if sim_curves:
+                                self._plot_time_domain_simulation_curves(
+                                    ax,
+                                    sim_curves,
+                                    measured_color=color,
+                                    offset_color_map=sim_offset_colors,
+                                    linewidth=1.2,
+                                    spec=payload.get("_spec"),
+                                )
 
             if gradient == "All":
                 for g in ['x', 'y', 'z']:
@@ -6095,88 +6340,79 @@ class EddyCurrentGUI(QWidget):
                         self._refresh_compare_measured_columns()
                     return
 
-                if use_add_case:
-                    primary_phantom = forced_phantom_value if forced_single_phantom else main_case_phantom
-                    cases = [{'base_path': base_path, 'setup': setup, 'phantom': primary_phantom}] + active_extra_cases
+                # -------------------------------------------------------
+                # SESSION-BASED PLOT LOGIC
+                # On first Plot (empty session): ask for colormap, create session.
+                # On subsequent Plots (session exists): reuse colormap, reuse cases.
+                # Add button only appends to session; Plot always uses the full session.
+                # -------------------------------------------------------
+                primary_phantom = forced_phantom_value if forced_single_phantom else main_case_phantom
+                current_case = {'base_path': base_path, 'setup': setup, 'phantom': primary_phantom}
 
-                    colormap_choice, ok = QInputDialog.getItem(
-                        self,
-                        "Select colormap",
-                        "Colormap:",
-                        ["Single-color gradient", "Viridis", "Inferno"],
-                        0,
-                        False
-                    )
-                    if not ok:
-                        return
+                use_subplots = (gradient == "All")
 
-                    use_subplots = False
-                    if gradient == "All":
-                        use_subplots = True
-
+                if not self._sim_overlay_session_cases and not use_add_case:
+                    # Completely fresh plot with no extra cases — just run single-case
+                    # path (existing behavior preserved).
                     if forced_all_phantoms:
+                        colormap_choice, ok = QInputDialog.getItem(
+                            self, "Select colormap", "Colormap:",
+                            ["Single-color gradient", "Viridis", "Inferno"], 0, False)
+                        if not ok:
+                            return
+                        cases = [current_case]
                         img_path = self._run_beddy_multi_case_all_phantoms(
-                            cases=cases,
-                            gradient=gradient,
-                            ndelay=ndelay,
+                            cases=cases, gradient=gradient, ndelay=ndelay,
                             apply_filter=apply_filter,
                             beprefilter_cutoff=beprefilter_cutoff,
                             beprefilter_order=beprefilter_order,
                             colormap=colormap_choice,
-                            save_dir=self.comparison_save_dir,
-                            save_plot=False
-                        )
+                            save_dir=self.comparison_save_dir, save_plot=False)
+                    else:
+                        single_phantom = forced_phantom_value if forced_single_phantom else main_case_phantom
+                        img_path = run_measured_analysis(
+                            base_path=base_path, setup=setup,
+                            phantom_position=single_phantom,
+                            gradient_selected=gradient, nDelay_selected=ndelay,
+                            apply_filter=apply_filter,
+                            beprefilter_cutoff=beprefilter_cutoff,
+                            beprefilter_order=beprefilter_order, save_plot=False)
+                else:
+                    # Multi-case path (either extra measured cases or sim-overlay session).
+                    if use_add_case:
+                        cases = [current_case] + active_extra_cases
+                    else:
+                        cases = [current_case]
+
+                    # Ask for colormap only on the very first multi-case plot.
+                    if not hasattr(self, '_multi_case_colormap') or self._multi_case_colormap is None:
+                        colormap_choice, ok = QInputDialog.getItem(
+                            self, "Select colormap", "Colormap:",
+                            ["Single-color gradient", "Viridis", "Inferno"], 0, False)
+                        if not ok:
+                            return
+                        self._multi_case_colormap = colormap_choice
+                        self._plot_session_color_index = 0
+                    else:
+                        colormap_choice = self._multi_case_colormap
+
+                    if forced_all_phantoms:
+                        img_path = self._run_beddy_multi_case_all_phantoms(
+                            cases=cases, gradient=gradient, ndelay=ndelay,
+                            apply_filter=apply_filter,
+                            beprefilter_cutoff=beprefilter_cutoff,
+                            beprefilter_order=beprefilter_order,
+                            colormap=colormap_choice,
+                            save_dir=self.comparison_save_dir, save_plot=False)
                     else:
                         img_path = self._run_beddy_multi_case(
-                            cases=cases,
-                            gradient=gradient,
-                            ndelay=ndelay,
+                            cases=cases, gradient=gradient, ndelay=ndelay,
                             apply_filter=apply_filter,
                             beprefilter_cutoff=beprefilter_cutoff,
                             beprefilter_order=beprefilter_order,
                             colormap=colormap_choice,
                             use_subplots=use_subplots,
-                            save_dir=self.comparison_save_dir,
-                            save_plot=False
-                        )
-                else:
-                    # Original single-case Beddy analysis
-                    if forced_all_phantoms:
-                        colormap_choice, ok = QInputDialog.getItem(
-                            self,
-                            "Select colormap",
-                            "Colormap:",
-                            ["Single-color gradient", "Viridis", "Inferno"],
-                            0,
-                            False
-                        )
-                        if not ok:
-                            return
-                        cases = [{'base_path': base_path, 'setup': setup, 'phantom': main_case_phantom}]
-                        img_path = self._run_beddy_multi_case_all_phantoms(
-                            cases=cases,
-                            gradient=gradient,
-                            ndelay=ndelay,
-                            apply_filter=apply_filter,
-                            beprefilter_cutoff=beprefilter_cutoff,
-                            beprefilter_order=beprefilter_order,
-                            colormap=colormap_choice,
-                            save_dir=self.comparison_save_dir,
-                            save_plot=False
-                        )
-                    else:
-                        single_phantom = forced_phantom_value if forced_single_phantom else main_case_phantom
-                        img_path = run_measured_analysis(
-                            base_path=base_path,
-                            setup=setup,
-                            phantom_position=single_phantom,
-                            gradient_selected=gradient,
-                            nDelay_selected=ndelay,
-                            apply_filter=apply_filter,
-                            beprefilter_cutoff=beprefilter_cutoff,
-                            beprefilter_order=beprefilter_order,
-                            save_plot=False
-                        )
+                            save_dir=self.comparison_save_dir, save_plot=False)
                 
                 if img_path and os.path.exists(img_path):
                     # Load the figure for saving

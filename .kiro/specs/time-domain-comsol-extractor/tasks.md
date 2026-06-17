@@ -85,7 +85,7 @@ Implement `Time_domain_extraction_GUI.m` as a MATLAB script-based GUI (uifigure)
     - Validate that each converted value is in `[-1, 1]` m; issue `uiconfirm` warning if outside range (Req 13.4)
     - _Requirements: 5.4, 5.5, 5.6, 13.1, 13.4_
 
-  - [~] 6.2 Implement `format_offset_value(val_mm)` → string for filename
+  - [ ] 6.2 Implement `format_offset_value(val_mm)` → string for filename
     - Return integer string (e.g. `'10'`) if `val_mm` is a whole number, decimal string otherwise (e.g. `'5.5'`)
     - _Requirements: 10.2_
 
@@ -95,21 +95,21 @@ Implement `Time_domain_extraction_GUI.m` as a MATLAB script-based GUI (uifigure)
     - Generate random integer-valued offsets; assert no `'.'` in result
     - _Requirements: 10.2_
 
-- [~] 7. Implement time filter configuration and validation (`apply_time_filter`)
-  - [~] 7.1 Implement `apply_time_filter(t_vec, data_vec, filter_ms)` → `[t_out, data_out]`
+- [ ] 7. Implement time filter configuration and validation (`apply_time_filter`)
+  - [ ] 7.1 Implement `apply_time_filter(t_vec, data_vec, filter_ms)` → `[t_out, data_out]`
     - If `filter_ms` is empty/whitespace, return full vectors (Req 6.2)
     - Convert `filter_ms / 1000` → `T_s`; retain only indices where `t_vec >= T_s` (Req 6.3, 13.2)
     - Raise error string for non-positive or non-numeric `filter_ms` (Req 6.4)
     - _Requirements: 6.2, 6.3, 6.4, 13.2_
 
-  - [~] 7.2 Write property test for `apply_time_filter`
+  - [ ] 7.2 Write property test for `apply_time_filter`
     - **Property 3: apply_time_filter output contains only t values >= threshold**
     - **Validates: Requirements 6.3, 13.2**
     - For arbitrary time vectors and thresholds, assert `all(t_out >= T_s)`
     - _Requirements: 6.3, 13.2_
 
-- [~] 8. Implement Beddy expression data extraction (`extract_point_data`)
-  - [~] 8.1 Implement `extract_point_data(model, pt_tag, ref_sol_id, comp_sol_id)` → `[t_vec, beddy_uT]`
+- [ ] 8. Implement Beddy expression data extraction (`extract_point_data`)
+  - [ ] 8.1 Implement `extract_point_data(model, pt_tag, ref_sol_id, comp_sol_id)` → `[t_vec, beddy_uT]`
     - Build expression string: `['mf.By - withsol(''' ref_sol_id ''', mf.By, setval(t, t))']` (Req 8.1, 8.2)
     - Create or reuse a `PlotGroup1D` (tag `pgTimeDomain`) and `PointGraph` feature (tag `ptgr1`) in the model result tree (Req 8.3)
     - Set `expr` to the Beddy expression, `unit` to `'uT'`, `data` to `pt_tag`, and `solrepresentation` / `sol` to `comp_sol_id` (Req 8.4)
@@ -117,36 +117,36 @@ Implement `Time_domain_extraction_GUI.m` as a MATLAB script-based GUI (uifigure)
     - If result is empty or all-NaN: log a warning with location/offset info and return empty (Req 8.5)
     - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6_
 
-  - [~] 8.2 Write unit tests for `extract_point_data` guard conditions
+  - [ ] 8.2 Write unit tests for `extract_point_data` guard conditions
     - Test empty-result branch returns `[]` and logs warning string
     - Test all-NaN branch returns `[]`
     - _Requirements: 8.5_
 
-- [~] 9. Implement output folder creation and file writing (`write_output_file`)
-  - [~] 9.1 Implement sub-folder creation for all 7 locations
+- [ ] 9. Implement output folder creation and file writing (`write_output_file`)
+  - [ ] 9.1 Implement sub-folder creation for all 7 locations
     - Sub-folder names: `Center`, `+X`, `-X`, `+Y`, `-Y`, `+Z`, `-Z` (Req 9.3)
     - Use `mkdir` idempotently; do not error if folder exists (Req 9.4)
     - _Requirements: 9.3, 9.4_
 
-  - [~] 9.2 Implement `write_output_file(out_folder, location, axis, val_mm, t_vec, beddy_uT)` → file path
+  - [ ] 9.2 Implement `write_output_file(out_folder, location, axis, val_mm, t_vec, beddy_uT)` → file path
     - Build filename: nominal → `BeddyTime_Point_<Location>.txt`; offset → `BeddyTime_Point_<Location>_Offset<Axis>_<Value>mm.txt` (Req 10.1, 10.2)
     - Write to `<out_folder>/<location>/<filename>`; two tab-separated columns with header `t_s\tBeddy_uT` (Req 10.3, 10.4)
     - _Requirements: 10.1, 10.2, 10.3, 10.4_
 
-  - [~] 9.3 Write property test for filename generation
+  - [ ] 9.3 Write property test for filename generation
     - **Property 4: Nominal filename contains no 'Offset' substring; offset filename encodes axis and value**
     - **Validates: Requirements 10.1, 10.2**
     - Generate arbitrary location/axis/value combinations; assert naming invariants hold
     - _Requirements: 10.1, 10.2_
 
-- [~] 10. Implement overwrite policy dialog and session state
+- [ ] 10. Implement overwrite policy dialog and session state
   - Implement session-scoped `overwrite_policy` variable (reset to `'unset'` at start of each extraction run) (Req 11.6)
   - Before each file write, check if file exists; if yes and policy is `'unset'`, show modal `uiconfirm` with four buttons: "Yes", "No", "Yes to All", "No to All" (Req 11.1)
   - Apply policy transitions per Req 11.2–11.5
   - _Requirements: 11.1, 11.2, 11.3, 11.4, 11.5, 11.6_
 
-- [~] 11. Implement the main extraction loop with progress feedback and cancellation
-  - [~] 11.1 Implement the `Extract` button callback orchestrating the full extraction loop
+- [ ] 11. Implement the main extraction loop with progress feedback and cancellation
+  - [ ] 11.1 Implement the `Extract` button callback orchestrating the full extraction loop
     - Validate output folder and time filter field before starting; show `uierrordlg` and abort on invalid input (Req 6.4)
     - Reset `overwrite_policy` to `'unset'` (Req 11.6)
     - Set comparison study's `sol_id` on all 7 point datasets (Req 7.5)
@@ -157,26 +157,26 @@ Implement `Time_domain_extraction_GUI.m` as a MATLAB script-based GUI (uifigure)
     - After loop: show summary `uialert` with total written / skipped / errors (Req 12.4)
     - _Requirements: 5.7, 5.8, 7.3, 12.1, 12.2, 12.3, 12.4_
 
-  - [~] 11.2 Implement the `Cancel` button callback
+  - [ ] 11.2 Implement the `Cancel` button callback
     - Set a shared `cancel_requested` flag that the extraction loop checks after each file write
     - When triggered, finish the current file write, then stop; show cancellation confirmation (Req 12.5)
     - _Requirements: 12.5_
 
-- [~] 12. Checkpoint — Ensure all helper functions integrate end-to-end
+- [ ] 12. Checkpoint — Ensure all helper functions integrate end-to-end
   - Wire `detect_studies` output into comparison drop-down population and `ref_sol_id` storage
   - Wire `create_point_datasets` call at extraction start
   - Verify COMSOL parameter reset to `'0'` after each axis loop (Req 7.3)
   - Ensure all tests pass, ask the user if questions arise.
   - _Requirements: 2.1, 2.2, 7.3_
 
-- [~] 13. Final validation and unit conversion audit
-  - [~] 13.1 Audit every COMSOL parameter assignment to confirm mm→m conversion (`* 1e-3`) is applied (Req 13.1)
-  - [~] 13.2 Audit every time-filter comparison to confirm ms→s conversion (`/ 1000`) is applied (Req 13.2)
-  - [~] 13.3 Confirm `unit` is set to `'uT'` in every `extract_point_data` call and no manual scaling factor is applied (Req 13.3)
-  - [~] 13.4 Confirm the `[-1, 1]` m range check is present for all offset values (Req 13.4)
+- [ ] 13. Final validation and unit conversion audit
+  - [ ] 13.1 Audit every COMSOL parameter assignment to confirm mm→m conversion (`* 1e-3`) is applied (Req 13.1)
+  - [ ] 13.2 Audit every time-filter comparison to confirm ms→s conversion (`/ 1000`) is applied (Req 13.2)
+  - [ ] 13.3 Confirm `unit` is set to `'uT'` in every `extract_point_data` call and no manual scaling factor is applied (Req 13.3)
+  - [ ] 13.4 Confirm the `[-1, 1]` m range check is present for all offset values (Req 13.4)
   - _Requirements: 13.1, 13.2, 13.3, 13.4_
 
-- [~] 14. Final checkpoint — Ensure all tests pass
+- [ ] 14. Final checkpoint — Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes
