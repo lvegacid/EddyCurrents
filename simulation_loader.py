@@ -26,7 +26,14 @@ class TimeDomainSimulationLoader:
         self.simulation_root = simulation_root
         self.time_zero_ms = float(time_zero_ms)
 
-    def detect_available_offsets(self, setup_name):
+    def detect_available_materials(self, setup_name, gradient="GX"):
+        setup_dir = self._setup_dir(setup_name)
+        gradient_dir = os.path.join(setup_dir, str(gradient or "GX").strip())
+        if not os.path.isdir(gradient_dir):
+            return []
+        return self._gradient_material_dirs(gradient_dir)
+
+    def detect_available_offsets(self, setup_name, materials=None):
         setup_dir = self._setup_dir(setup_name)
         if not os.path.isdir(setup_dir):
             return []
@@ -36,14 +43,23 @@ class TimeDomainSimulationLoader:
             gradient_dir = os.path.join(setup_dir, gradient)
             if not os.path.isdir(gradient_dir):
                 continue
-            for location in self.LOCATIONS:
-                point_dir = os.path.join(gradient_dir, location)
-                if not os.path.isdir(point_dir):
-                    continue
-                for fname in os.listdir(point_dir):
-                    parsed = self._parse_filename(fname)
-                    if parsed and parsed["offset_key"]:
-                        found.add(parsed["offset_key"])
+            material_dirs, _ = self._resolve_material_dirs(gradient_dir, materials)
+            if not material_dirs:
+                continue
+            for material_name in material_dirs:
+                location_root = (
+                    os.path.join(gradient_dir, material_name)
+                    if material_name is not None
+                    else gradient_dir
+                )
+                for location in self.LOCATIONS:
+                    point_dir = os.path.join(location_root, location)
+                    if not os.path.isdir(point_dir):
+                        continue
+                    for fname in os.listdir(point_dir):
+                        parsed = self._parse_filename(fname)
+                        if parsed and parsed["offset_key"]:
+                            found.add(parsed["offset_key"])
         return sorted(found, key=self._offset_sort_key)
 
     def load_plot_ready_data(
@@ -53,6 +69,7 @@ class TimeDomainSimulationLoader:
         locations=None,
         offset_mode="none",
         selected_offsets=None,
+        materials=None,
     ):
         result = {
             "curves": defaultdict(lambda: defaultdict(list)),
@@ -76,62 +93,93 @@ class TimeDomainSimulationLoader:
                 result["warnings"].append(f"Time-domain simulations not found for {gradient}")
                 continue
 
-            for location in locations:
-                point_dir = os.path.join(gradient_dir, location)
-                if not os.path.isdir(point_dir):
-                    result["warnings"].append(
-                        f"Time-domain simulations not found for {gradient} / {location}"
-                    )
-                    continue
+            material_dirs, missing_materials = self._resolve_material_dirs(gradient_dir, materials)
+            for missing_material in missing_materials:
+                result["warnings"].append(
+                    f"Time-domain simulations not found for {gradient} / {missing_material}"
+                )
+            if not material_dirs:
+                continue
 
-                location_curves = []
-                nominal_loaded = False
-                offset_seen = False
+            for material_name in material_dirs:
+                location_root = (
+                    os.path.join(gradient_dir, material_name)
+                    if material_name is not None
+                    else gradient_dir
+                )
 
-                for fname in sorted(os.listdir(point_dir)):
-                    parsed = self._parse_filename(fname)
-                    if not parsed or parsed["location"] != location:
+                for location in locations:
+                    point_dir = os.path.join(location_root, location)
+                    if not os.path.isdir(point_dir):
+                        if material_name is None:
+                            result["warnings"].append(
+                                f"Time-domain simulations not found for {gradient} / {location}"
+                            )
+                        else:
+                            result["warnings"].append(
+                                f"Time-domain simulations not found for {gradient} / {material_name} / {location}"
+                            )
                         continue
 
-                    offset_key = parsed["offset_key"]
-                    if offset_key is None:
-                        if nominal_loaded:
-                            continue
-                        curve = self._load_curve(os.path.join(point_dir, fname), "Sim", None)
-                        nominal_loaded = True
-                    else:
-                        if offset_mode == "none":
-                            continue
-                        if offset_mode == "selected" and offset_key not in selected_offsets:
-                            continue
-                        curve = self._load_curve(
-                            os.path.join(point_dir, fname),
-                            self._legend_label_for_offset(offset_key),
-                            offset_key,
-                        )
-                        offset_seen = True
+                    location_curves = []
+                    nominal_loaded = False
+                    offset_seen = False
 
-                    if curve is None:
-                        result["warnings"].append(
-                            f"Invalid time-domain simulation file: {os.path.join(point_dir, fname)}"
-                        )
+                    for fname in sorted(os.listdir(point_dir)):
+                        parsed = self._parse_filename(fname)
+                        if not parsed or parsed["location"] != location:
+                            continue
+
+                        offset_key = parsed["offset_key"]
+                        if offset_key is None:
+                            if nominal_loaded:
+                                continue
+                            curve = self._load_curve(
+                                os.path.join(point_dir, fname),
+                                "Sim",
+                                None,
+                                material_name=material_name,
+                            )
+                            nominal_loaded = True
+                        else:
+                            if offset_mode == "none":
+                                continue
+                            if offset_mode == "selected" and offset_key not in selected_offsets:
+                                continue
+                            curve = self._load_curve(
+                                os.path.join(point_dir, fname),
+                                self._legend_label_for_offset(offset_key),
+                                offset_key,
+                                material_name=material_name,
+                            )
+                            offset_seen = True
+
+                        if curve is None:
+                            result["warnings"].append(
+                                f"Invalid time-domain simulation file: {os.path.join(point_dir, fname)}"
+                            )
+                            continue
+                        location_curves.append(curve)
+
+                    if not location_curves:
+                        if offset_mode == "none" or not offset_seen:
+                            if material_name is None:
+                                result["warnings"].append(
+                                    f"Time-domain simulations not found for {gradient} / {location}"
+                                )
+                            else:
+                                result["warnings"].append(
+                                    f"Time-domain simulations not found for {gradient} / {material_name} / {location}"
+                                )
                         continue
-                    location_curves.append(curve)
 
-                if not location_curves:
-                    if offset_mode == "none" or not offset_seen:
-                        result["warnings"].append(
-                            f"Time-domain simulations not found for {gradient} / {location}"
-                        )
-                    continue
-
-                result["curves"][gradient][location].extend(location_curves)
+                    result["curves"][gradient][location].extend(location_curves)
 
         result["curves"] = self._freeze_curves(result["curves"])
         result["warnings"] = self._dedupe(result["warnings"])
         return result
 
-    def _load_curve(self, file_path, label, offset_key):
+    def _load_curve(self, file_path, label, offset_key, material_name=None):
         arr = self._read_numeric_txt(file_path)
         if arr is None or arr.shape[1] < 2:
             return None
@@ -154,6 +202,7 @@ class TimeDomainSimulationLoader:
         return {
             "label": label,
             "offset_key": offset_key,
+            "material": material_name,
             "time_ms": time_ms - self.time_zero_ms,
             "values": values,
             "source_path": file_path,
@@ -221,6 +270,29 @@ class TimeDomainSimulationLoader:
     def _setup_dir(self, setup_name):
         return os.path.join(self.simulation_root, str(setup_name or "").strip())
 
+    def _gradient_material_dirs(self, gradient_dir):
+        entries = []
+        try:
+            entries = [
+                name
+                for name in os.listdir(gradient_dir)
+                if os.path.isdir(os.path.join(gradient_dir, name))
+            ]
+        except Exception:
+            return []
+        return sorted([name for name in entries if name not in self.LOCATIONS])
+
+    def _resolve_material_dirs(self, gradient_dir, materials):
+        available = self._gradient_material_dirs(gradient_dir)
+        requested = [str(m).strip() for m in (materials or []) if str(m).strip()]
+        if requested:
+            selected = [m for m in requested if m in available]
+            missing = [m for m in requested if m not in available]
+            return selected, missing
+        if available:
+            return available, []
+        return [None], []
+
     def _compact_number(self, value):
         num = float(value)
         if abs(num - round(num)) < 1e-9:
@@ -287,7 +359,7 @@ class CylinderTimeDomainLoader(TimeDomainSimulationLoader):
     # Public API additions
     # ------------------------------------------------------------------
 
-    def detect_hr_values(self, setup_name):
+    def detect_hr_values(self, setup_name, materials=None):
         """
         Scan all Cylinder files in setup_name and return sorted lists of
         discovered H and R values (as compact strings like '10', '5.5').
@@ -302,15 +374,25 @@ class CylinderTimeDomainLoader(TimeDomainSimulationLoader):
             gradient_dir = os.path.join(setup_dir, gradient)
             if not os.path.isdir(gradient_dir):
                 continue
-            for location in self.LOCATIONS:
-                loc_dir = os.path.join(gradient_dir, location)
-                if not os.path.isdir(loc_dir):
-                    continue
-                for fname in os.listdir(loc_dir):
-                    parsed = self._parse_filename(fname)
-                    if parsed:
-                        h_set.add(parsed["h"])
-                        r_set.add(parsed["r"])
+            material_dirs, _ = self._resolve_material_dirs(gradient_dir, materials)
+            if not material_dirs:
+                continue
+            for material_name in material_dirs:
+                location_root = (
+                    os.path.join(gradient_dir, material_name)
+                    if material_name is not None
+                    else gradient_dir
+                )
+                for location in self.LOCATIONS:
+                    loc_dir = os.path.join(location_root, location)
+                    if not os.path.isdir(loc_dir):
+                        continue
+                    for fname in os.listdir(loc_dir):
+                        # Detect all available H/R values regardless of current selection.
+                        parsed = self._parse_filename_raw(fname)
+                        if parsed:
+                            h_set.add(parsed["h"])
+                            r_set.add(parsed["r"])
 
         def _sort_key(v):
             try:
@@ -334,7 +416,7 @@ class CylinderTimeDomainLoader(TimeDomainSimulationLoader):
         except (ValueError, TypeError):
             self._selected_r = None
 
-    def detect_available_offsets(self, setup_name):
+    def detect_available_offsets(self, setup_name, materials=None):
         """Return offset keys found in Cylinder files for this setup."""
         setup_dir = self._setup_dir(setup_name)
         if not os.path.isdir(setup_dir):
@@ -345,21 +427,30 @@ class CylinderTimeDomainLoader(TimeDomainSimulationLoader):
             gradient_dir = os.path.join(setup_dir, gradient)
             if not os.path.isdir(gradient_dir):
                 continue
-            for location in self.LOCATIONS:
-                loc_dir = os.path.join(gradient_dir, location)
-                if not os.path.isdir(loc_dir):
-                    continue
-                for fname in os.listdir(loc_dir):
-                    parsed = self._parse_filename(fname)
-                    if parsed and parsed["offset_key"]:
-                        found.add(parsed["offset_key"])
+            material_dirs, _ = self._resolve_material_dirs(gradient_dir, materials)
+            if not material_dirs:
+                continue
+            for material_name in material_dirs:
+                location_root = (
+                    os.path.join(gradient_dir, material_name)
+                    if material_name is not None
+                    else gradient_dir
+                )
+                for location in self.LOCATIONS:
+                    loc_dir = os.path.join(location_root, location)
+                    if not os.path.isdir(loc_dir):
+                        continue
+                    for fname in os.listdir(loc_dir):
+                        parsed = self._parse_filename(fname)
+                        if parsed and parsed["offset_key"]:
+                            found.add(parsed["offset_key"])
         return sorted(found, key=self._offset_sort_key)
 
     # ------------------------------------------------------------------
     # Override: filename parsing
     # ------------------------------------------------------------------
 
-    def _parse_filename(self, fname):
+    def _parse_filename_raw(self, fname):
         match = self.FILE_RE.match(str(fname or "").strip())
         if not match:
             return None
@@ -369,20 +460,6 @@ class CylinderTimeDomainLoader(TimeDomainSimulationLoader):
         location = match.group("location")
         axis = match.group("axis")
         value = match.group("value")
-
-        # Apply H/R filter if set
-        if self._selected_h is not None:
-            try:
-                if abs(float(h_raw) - self._selected_h) > 1e-6:
-                    return None
-            except (ValueError, TypeError):
-                pass
-        if self._selected_r is not None:
-            try:
-                if abs(float(r_raw) - self._selected_r) > 1e-6:
-                    return None
-            except (ValueError, TypeError):
-                pass
 
         offset_key = None
         if axis and value is not None:
@@ -397,6 +474,29 @@ class CylinderTimeDomainLoader(TimeDomainSimulationLoader):
             "offset_key": offset_key,
         }
 
+    def _parse_filename(self, fname):
+        parsed = self._parse_filename_raw(fname)
+        if not parsed:
+            return None
+
+        h_raw = parsed["h"]
+        r_raw = parsed["r"]
+
+        # Apply H/R filter if set
+        if self._selected_h is not None:
+            try:
+                if abs(float(h_raw) - self._selected_h) > 1e-6:
+                    return None
+            except (ValueError, TypeError):
+                pass
+        if self._selected_r is not None:
+            try:
+                if abs(float(r_raw) - self._selected_r) > 1e-6:
+                    return None
+            except (ValueError, TypeError):
+                pass
+        return parsed
+
     # ------------------------------------------------------------------
     # Override: legend label for nominal curve
     # ------------------------------------------------------------------
@@ -408,6 +508,7 @@ class CylinderTimeDomainLoader(TimeDomainSimulationLoader):
         locations=None,
         offset_mode="none",
         selected_offsets=None,
+        materials=None,
     ):
         """
         Identical flow to the parent, but nominal curves get a Cylinder label.
@@ -440,58 +541,84 @@ class CylinderTimeDomainLoader(TimeDomainSimulationLoader):
                 result["warnings"].append(f"Cylinder simulations not found for {gradient}")
                 continue
 
-            for location in locations:
-                loc_dir = os.path.join(gradient_dir, location)
-                if not os.path.isdir(loc_dir):
-                    result["warnings"].append(
-                        f"Cylinder simulations not found for {gradient} / {location}"
-                    )
-                    continue
+            material_dirs, missing_materials = self._resolve_material_dirs(gradient_dir, materials)
+            for missing_material in missing_materials:
+                result["warnings"].append(
+                    f"Cylinder simulations not found for {gradient} / {missing_material}"
+                )
+            if not material_dirs:
+                continue
 
-                location_curves = []
-                nominal_loaded = False
-                offset_seen = False
+            for material_name in material_dirs:
+                location_root = (
+                    os.path.join(gradient_dir, material_name)
+                    if material_name is not None
+                    else gradient_dir
+                )
 
-                for fname in sorted(os.listdir(loc_dir)):
-                    parsed = self._parse_filename(fname)
-                    if not parsed or parsed["location"] != location:
+                for location in locations:
+                    loc_dir = os.path.join(location_root, location)
+                    if not os.path.isdir(loc_dir):
+                        if material_name is None:
+                            result["warnings"].append(
+                                f"Cylinder simulations not found for {gradient} / {location}"
+                            )
+                        else:
+                            result["warnings"].append(
+                                f"Cylinder simulations not found for {gradient} / {material_name} / {location}"
+                            )
                         continue
 
-                    offset_key = parsed["offset_key"]
-                    if offset_key is None:
-                        if nominal_loaded:
-                            continue
-                        curve = self._load_curve(
-                            os.path.join(loc_dir, fname), nominal_label, None
-                        )
-                        nominal_loaded = True
-                    else:
-                        if offset_mode == "none":
-                            continue
-                        if offset_mode == "selected" and offset_key not in selected_offsets:
-                            continue
-                        curve = self._load_curve(
-                            os.path.join(loc_dir, fname),
-                            self._legend_label_for_offset(offset_key),
-                            offset_key,
-                        )
-                        offset_seen = True
+                    location_curves = []
+                    nominal_loaded = False
+                    offset_seen = False
 
-                    if curve is None:
-                        result["warnings"].append(
-                            f"Invalid Cylinder simulation file: {os.path.join(loc_dir, fname)}"
-                        )
+                    for fname in sorted(os.listdir(loc_dir)):
+                        parsed = self._parse_filename(fname)
+                        if not parsed or parsed["location"] != location:
+                            continue
+
+                        offset_key = parsed["offset_key"]
+                        if offset_key is None:
+                            if nominal_loaded:
+                                continue
+                            curve = self._load_curve(
+                                os.path.join(loc_dir, fname), nominal_label, None, material_name=material_name
+                            )
+                            nominal_loaded = True
+                        else:
+                            if offset_mode == "none":
+                                continue
+                            if offset_mode == "selected" and offset_key not in selected_offsets:
+                                continue
+                            curve = self._load_curve(
+                                os.path.join(loc_dir, fname),
+                                self._legend_label_for_offset(offset_key),
+                                offset_key,
+                                material_name=material_name,
+                            )
+                            offset_seen = True
+
+                        if curve is None:
+                            result["warnings"].append(
+                                f"Invalid Cylinder simulation file: {os.path.join(loc_dir, fname)}"
+                            )
+                            continue
+                        location_curves.append(curve)
+
+                    if not location_curves:
+                        if offset_mode == "none" or not offset_seen:
+                            if material_name is None:
+                                result["warnings"].append(
+                                    f"Cylinder simulations not found for {gradient} / {location}"
+                                )
+                            else:
+                                result["warnings"].append(
+                                    f"Cylinder simulations not found for {gradient} / {material_name} / {location}"
+                                )
                         continue
-                    location_curves.append(curve)
 
-                if not location_curves:
-                    if offset_mode == "none" or not offset_seen:
-                        result["warnings"].append(
-                            f"Cylinder simulations not found for {gradient} / {location}"
-                        )
-                    continue
-
-                result["curves"][gradient][location].extend(location_curves)
+                    result["curves"][gradient][location].extend(location_curves)
 
         result["curves"] = self._freeze_curves(result["curves"])
         result["warnings"] = self._dedupe(result["warnings"])

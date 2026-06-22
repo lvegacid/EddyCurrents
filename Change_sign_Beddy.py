@@ -5,7 +5,7 @@ from pathlib import Path
 # ==========================================================
 
 ROOT_FOLDER = Path(
-    r"Z:\Projects\EddyCurrents\Data_acquisition\Simulation results\COMSOL_Time_domain\OutWithoutBottomPlate\GX"
+    r"Z:\Projects\EddyCurrents\Data_acquisition\Simulation results\COMSOL_Time_domain\OutWithoutBottomPlate\GX\Al5754"
 )
 
 # ==========================================================
@@ -33,13 +33,14 @@ print(f"\nDeleted {deleted_backups} backup files.\n")
 # INVERT SECOND COLUMN OF CYLINDER TXT FILES ONLY
 # ==========================================================
 
+
 processed = 0
 failed = 0
 
 for file in ROOT_FOLDER.rglob("*.txt"):
 
-    # Process only files containing "Cylinder" in the filename
-    if "cylinder" not in file.name.lower():
+    # Process only files containing "Cylinder" in the filename. If I dont want to filter anything I just put ""
+    if "" not in file.name.lower():
         continue
 
     try:
