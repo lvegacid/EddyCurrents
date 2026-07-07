@@ -1942,17 +1942,13 @@ end
 
 % --------------------------------------------------------------------------
 function update_solution_after_offset(model, sol_id)
-% update_solution_after_offset  Refresh the selected COMSOL solution after offset changes.
+% update_solution_after_offset  Keep offset parameters applied without forcing a mesh rebuild.
     if isempty(strtrim(sol_id))
         return;
     end
 
-    try
-        model.sol(sol_id).updateSolution;
-    catch err
-        error('update_solution_after_offset:Failed', ...
-            'Could not update solution %s after offset change: %s', sol_id, err.message);
-    end
+    % The extraction workflow only needs the updated postprocessing parameters.
+    % Re-solving here can trigger a transient remesh and fail on valid models.
 end
 
 % --------------------------------------------------------------------------
@@ -2499,15 +2495,8 @@ end
 
 % --------------------------------------------------------------------------
 function refresh_cylinder_geometry_and_solutions(model, ref_sol_id, comp_sol_id)
-% refresh_cylinder_geometry_and_solutions  Rebuild geometry and refresh both solutions.
+% refresh_cylinder_geometry_and_solutions  Rebuild geometry without forcing a solver refresh.
     model.component('comp2').geom('geom2').runPre('fin');
-
-    if ~isempty(strtrim(ref_sol_id))
-        model.sol(ref_sol_id).updateSolution;
-    end
-    if ~isempty(strtrim(comp_sol_id))
-        model.sol(comp_sol_id).updateSolution;
-    end
 end
 
 % --------------------------------------------------------------------------
@@ -2633,39 +2622,13 @@ function ensure_cylinder_volume_export(model, dataset_tag, expr, export_path)
     model.result.numerical('av2').setResult;
 
     try
-        result_tags = cell(model.result.tags);
-    catch
-        result_tags = {};
+        model.result.table('tbl25').save(export_path);
+    catch err
+        try
+            model.result.table('tbl25').saveFile(export_path);
+        catch
+            error('ensure_cylinder_volume_export:TableSaveFailed', ...
+                'Could not export cylinder table to %s: %s', export_path, err.message);
+        end
     end
-    if ~any(strcmp(result_tags, 'pg27'))
-        model.result.create('pg27', 'PlotGroup1D');
-    end
-    model.result('pg27').set('data', 'none');
-
-    try
-        feature_tags = cell(model.result('pg27').feature.tags);
-    catch
-        feature_tags = {};
-    end
-    if ~any(strcmp(feature_tags, 'tblp1'))
-        model.result('pg27').create('tblp1', 'Table');
-    end
-
-    model.result('pg27').feature('tblp1').set('source', 'table');
-    model.result('pg27').feature('tblp1').set('table', 'tbl25');
-    model.result('pg27').feature('tblp1').set('linewidth', 'preference');
-    model.result('pg27').feature('tblp1').set('markerpos', 'datapoints');
-    model.result('pg27').run;
-
-    try
-        export_tags = cell(model.result.export.tags);
-    catch
-        export_tags = {};
-    end
-    if ~any(strcmp(export_tags, 'plot7'))
-        model.result.export.create('plot7', 'pg27', 'tblp1', 'Plot');
-    end
-
-    model.result.export('plot7').set('filename', export_path);
-    model.result.export('plot7').run;
 end
