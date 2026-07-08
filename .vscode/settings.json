@@ -3,6 +3,10 @@
     "python-envs.defaultPackageManager": "ms-python.python:conda",
     "chat.tools.terminal.autoApprove": {
         "git commit": true,
-        "&": true
+        "&": true,
+        "/^git restore --source ca72303 -- Time_domain_extraction_GUI\\.m; git status --short; git diff -- Time_domain_extraction_GUI\\.m \\| Select-Object -First 120$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
     }
 }

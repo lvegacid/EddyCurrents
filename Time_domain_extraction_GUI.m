@@ -1942,13 +1942,17 @@ end
 
 % --------------------------------------------------------------------------
 function update_solution_after_offset(model, sol_id)
-% update_solution_after_offset  Keep offset parameters applied without forcing a mesh rebuild.
+% update_solution_after_offset  Refresh the selected COMSOL solution after offset changes.
     if isempty(strtrim(sol_id))
         return;
     end
 
-    % The extraction workflow only needs the updated postprocessing parameters.
-    % Re-solving here can trigger a transient remesh and fail on valid models.
+    try
+        model.sol(sol_id).updateSolution;
+    catch err
+        error('update_solution_after_offset:Failed', ...
+            'Could not update solution %s after offset change: %s', sol_id, err.message);
+    end
 end
 
 % --------------------------------------------------------------------------
@@ -2495,8 +2499,15 @@ end
 
 % --------------------------------------------------------------------------
 function refresh_cylinder_geometry_and_solutions(model, ref_sol_id, comp_sol_id)
-% refresh_cylinder_geometry_and_solutions  Rebuild geometry without forcing a solver refresh.
+% refresh_cylinder_geometry_and_solutions  Rebuild geometry and refresh both solutions.
     model.component('comp2').geom('geom2').runPre('fin');
+
+    if ~isempty(strtrim(ref_sol_id))
+        model.sol(ref_sol_id).updateSolution;
+    end
+    if ~isempty(strtrim(comp_sol_id))
+        model.sol(comp_sol_id).updateSolution;
+    end
 end
 
 % --------------------------------------------------------------------------
@@ -2586,49 +2597,80 @@ function ensure_cylinder_volume_export(model, dataset_tag, expr, export_path)
         delete(export_path);
     end
 
+    numerical_tag = 'av1';
+    table_tag = 'tbl25';
+    plot_group_tag = 'pg28';
+    plot_feature_tag = 'tblp1';
+    export_tag = 'plot7';
+
     try
         numerical_tags = cell(model.result.numerical.tags);
     catch
         numerical_tags = {};
     end
-    if ~any(strcmp(numerical_tags, 'av2'))
-        model.result.numerical.create('av2', 'AvVolume');
+    if ~any(strcmp(numerical_tags, numerical_tag))
+        model.result.numerical.create(numerical_tag, 'AvVolume');
     end
 
-    model.result.numerical('av2').set('data', dataset_tag);
-    model.result.numerical('av2').setIndex('expr', expr, 0);
-    model.result.numerical('av2').selection.all;
-    model.result.numerical('av2').setIndex('unit', 'uT', 0);
+    model.result.numerical(numerical_tag).set('data', dataset_tag);
+    model.result.numerical(numerical_tag).setIndex('expr', expr, 0);
+    model.result.numerical(numerical_tag).selection.all;
+    model.result.numerical(numerical_tag).setIndex('unit', 'uT', 0);
 
     try
         table_tags = cell(model.result.table.tags);
     catch
         table_tags = {};
     end
-    if ~any(strcmp(table_tags, 'tbl25'))
-        model.result.table.create('tbl25', 'Table');
+    if ~any(strcmp(table_tags, table_tag))
+        model.result.table.create(table_tag, 'Table');
         try
-            model.result.table('tbl25').comments('Volume Average 2');
+            model.result.table(table_tag).comments('Volume Average 2');
         catch
         end
     end
 
     try
-        model.result.table('tbl25').clearTableData;
+        model.result.table(table_tag).clearTableData;
     catch
     end
 
-    model.result.numerical('av2').set('table', 'tbl25');
-    model.result.numerical('av2').setResult;
+    model.result.numerical(numerical_tag).set('table', table_tag);
+    model.result.numerical(numerical_tag).setResult;
 
     try
-        model.result.table('tbl25').save(export_path);
-    catch err
+        result_tags = cell(model.result.tags);
+    catch
+        result_tags = {};
+    end
+    if any(strcmp(result_tags, plot_group_tag))
         try
-            model.result.table('tbl25').saveFile(export_path);
+            model.result.remove(plot_group_tag);
         catch
-            error('ensure_cylinder_volume_export:TableSaveFailed', ...
-                'Could not export cylinder table to %s: %s', export_path, err.message);
         end
     end
+    model.result.create(plot_group_tag, 'PlotGroup1D');
+    model.result(plot_group_tag).set('data', 'none');
+    model.result(plot_group_tag).create(plot_feature_tag, 'Table');
+    model.result(plot_group_tag).feature(plot_feature_tag).set('source', 'table');
+    model.result(plot_group_tag).feature(plot_feature_tag).set('table', table_tag);
+    model.result(plot_group_tag).feature(plot_feature_tag).set('linewidth', 'preference');
+    model.result(plot_group_tag).feature(plot_feature_tag).set('markerpos', 'datapoints');
+    model.result(plot_group_tag).run;
+
+    try
+        export_tags = cell(model.result.export.tags);
+    catch
+        export_tags = {};
+    end
+    if any(strcmp(export_tags, export_tag))
+        try
+            model.result.export.remove(export_tag);
+        catch
+        end
+    end
+    model.result.export.create(export_tag, plot_group_tag, plot_feature_tag, 'Plot');
+
+    model.result.export(export_tag).set('filename', export_path);
+    model.result.export(export_tag).run;
 end
