@@ -124,7 +124,8 @@ def run_measured_analysis(
     apply_filter=False,
     beprefilter_cutoff=0.08,
     beprefilter_order=4,
-    save_plot=True
+    save_plot=True,
+    return_figure=False,
 ):
 
     mm = _load_curve_metrics_helpers()
@@ -610,8 +611,11 @@ def run_measured_analysis(
     filename = f"Beddy_measured{filtered_tag}{mode_tag}_Grad_{gradient_selected}_nDelay_{nDelay_selected}.png"
 
     output_path = os.path.join(save_dir, filename)
-    plt.savefig(output_path, dpi=300)
-    plt.close()
+    fig = plt.gcf()
+    fig.savefig(output_path, dpi=300)
+    if return_figure:
+        return output_path, fig
+    plt.close(fig)
 
     return output_path
 

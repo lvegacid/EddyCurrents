@@ -522,8 +522,17 @@ class ZoomLabel(QLabel):
         self._selection_origin = None
         self._pan_origin = None
         self._pan_start_rect = QRect()
+        self._pan_enabled = False
+        self._display_scale = 1.0
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
+
+    def set_pan_enabled(self, enabled):
+        self._pan_enabled = bool(enabled)
+        if not self._pan_enabled:
+            self._pan_origin = None
+            self._pan_start_rect = QRect()
+            self.unsetCursor()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -546,8 +555,10 @@ class ZoomLabel(QLabel):
         self._orig_pixmap = pixmap
         if pixmap and not pixmap.isNull():
             self._view_rect = QRect(0, 0, pixmap.width(), pixmap.height())
+            self._display_scale = 1.0
         else:
             self._view_rect = QRect()
+            self._display_scale = 1.0
         self._rubber_band.hide()
         self._update_scaled()
 
@@ -555,8 +566,19 @@ class ZoomLabel(QLabel):
         if self._orig_pixmap is None or self._orig_pixmap.isNull():
             return
         self._view_rect = QRect(0, 0, self._orig_pixmap.width(), self._orig_pixmap.height())
+        self._display_scale = 1.0
         self._rubber_band.hide()
         self._update_scaled()
+
+    def _is_full_view(self):
+        if self._orig_pixmap is None or self._orig_pixmap.isNull() or self._view_rect.isNull():
+            return False
+        return (
+            self._view_rect.x() == 0
+            and self._view_rect.y() == 0
+            and self._view_rect.width() == self._orig_pixmap.width()
+            and self._view_rect.height() == self._orig_pixmap.height()
+        )
 
     def wheelEvent(self, event):
         if self._orig_pixmap is None or self._orig_pixmap.isNull() or self._view_rect.isNull():
@@ -566,12 +588,30 @@ class ZoomLabel(QLabel):
         if delta == 0:
             return
 
+        # Allow zooming out from the initial full-view fit-to-width state.
+        if delta < 0 and self._is_full_view():
+            self._display_scale = max(0.05, self._display_scale / 1.15)
+            self._update_scaled()
+            return
+
+        if delta > 0 and self._display_scale < 1.0 and self._is_full_view():
+            self._display_scale = min(1.0, self._display_scale * 1.15)
+            self._update_scaled()
+            return
+
         zoom_factor = 1 / 1.15 if delta > 0 else 1.15
         focus_x, focus_y = self._map_label_point_to_image(event.pos())
         self._zoom_around_point(focus_x, focus_y, zoom_factor)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
+            if self._pan_enabled:
+                if not self._point_in_displayed_pixmap(event.pos()):
+                    return
+                self._pan_origin = event.pos()
+                self._pan_start_rect = QRect(self._view_rect)
+                self.setCursor(Qt.ClosedHandCursor)
+                return
             if not self._point_in_displayed_pixmap(event.pos()):
                 return
             self._selection_origin = event.pos()
@@ -608,6 +648,12 @@ class ZoomLabel(QLabel):
             self._update_scaled()
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._pan_enabled and self._pan_origin is not None:
+            self._pan_origin = None
+            self._pan_start_rect = QRect()
+            self.unsetCursor()
+            return
+
         if event.button() == Qt.LeftButton and self._selection_origin is not None:
             selection_rect = self._rubber_band.geometry().normalized()
             self._rubber_band.hide()
@@ -629,18 +675,10 @@ class ZoomLabel(QLabel):
     def _display_rect_for_view(self):
         if self._orig_pixmap is None or self._orig_pixmap.isNull() or self._view_rect.isNull():
             return QRect()
-
-        view_w = max(1, self._view_rect.width())
-        view_h = max(1, self._view_rect.height())
-        label_w = max(1, self.width())
-        label_h = max(1, self.height())
-
-        scale = min(label_w / view_w, label_h / view_h)
-        disp_w = max(1, int(round(view_w * scale)))
-        disp_h = max(1, int(round(view_h * scale)))
-        left = int(round((label_w - disp_w) / 2))
-        top = int(round((label_h - disp_h) / 2))
-        return QRect(left, top, disp_w, disp_h)
+        pix = self.pixmap()
+        if pix is not None and not pix.isNull():
+            return QRect(0, 0, pix.width(), pix.height())
+        return QRect(0, 0, max(1, self.width()), max(1, self.height()))
 
     def _point_in_displayed_pixmap(self, pos):
         return self._display_rect_for_view().contains(pos)
@@ -693,6 +731,16 @@ class ZoomLabel(QLabel):
         new_w = max(20, int(round(clipped.width() * scale_x)))
         new_h = max(20, int(round(clipped.height() * scale_y)))
 
+        # Keep viewport aspect ratio fixed so zoom never deforms plot geometry.
+        target_aspect = self._view_rect.width() / max(1, self._view_rect.height())
+        if new_h > 0:
+            cur_aspect = new_w / new_h
+            if cur_aspect > target_aspect:
+                new_w = max(20, int(round(new_h * target_aspect)))
+            else:
+                new_h = max(20, int(round(new_w / max(1e-9, target_aspect))))
+
+        self._display_scale = 1.0
         self._view_rect = self._clamped_rect(QRect(new_x, new_y, new_w, new_h))
         self._update_scaled()
 
@@ -714,13 +762,12 @@ class ZoomLabel(QLabel):
             return
 
         cropped = self._orig_pixmap.copy(self._clamped_rect(self._view_rect))
-        scaled = cropped.scaled(
-            max(1, self.width()),
-            max(1, self.height()),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation
-        )
+        parent_w = self.parentWidget().width() if self.parentWidget() is not None else cropped.width()
+        target_w = max(1, int(parent_w))
+        scaled_w = max(1, int(round(target_w * self._display_scale)))
+        scaled = cropped.scaledToWidth(scaled_w, Qt.SmoothTransformation)
         super().setPixmap(scaled)
+        self.setFixedSize(scaled.size())
 
 
 class _SimulationOffsetSelectionDialog(QDialog):
@@ -1139,6 +1186,63 @@ class EddyCurrentGUI(QWidget):
         reset_zoom_btn.clicked.connect(self.reset_zoom)
         analyze_row.addWidget(reset_zoom_btn)
 
+        self.pan_mode_checkbox = QCheckBox("Pan")
+        self.pan_mode_checkbox.setToolTip("Drag with left mouse button to move the zoomed view")
+        self.pan_mode_checkbox.toggled.connect(self._set_plot_pan_mode)
+        analyze_row.addWidget(self.pan_mode_checkbox)
+
+        limits_row = QHBoxLayout()
+        analyze_group_layout.addLayout(limits_row)
+
+        limits_row.addWidget(QLabel("XLim"))
+        self.plot_xlim_min_spin = QDoubleSpinBox()
+        self.plot_xlim_min_spin.setDecimals(4)
+        self.plot_xlim_min_spin.setSingleStep(0.1)
+        self.plot_xlim_min_spin.setEnabled(False)
+        limits_row.addWidget(self.plot_xlim_min_spin)
+
+        self.plot_xlim_max_spin = QDoubleSpinBox()
+        self.plot_xlim_max_spin.setDecimals(4)
+        self.plot_xlim_max_spin.setSingleStep(0.1)
+        self.plot_xlim_max_spin.setEnabled(False)
+        limits_row.addWidget(self.plot_xlim_max_spin)
+
+        limits_row.addSpacing(12)
+        limits_row.addWidget(QLabel("YLim"))
+        self.plot_ylim_min_spin = QDoubleSpinBox()
+        self.plot_ylim_min_spin.setDecimals(4)
+        self.plot_ylim_min_spin.setSingleStep(0.1)
+        self.plot_ylim_min_spin.setEnabled(False)
+        limits_row.addWidget(self.plot_ylim_min_spin)
+
+        self.plot_ylim_max_spin = QDoubleSpinBox()
+        self.plot_ylim_max_spin.setDecimals(4)
+        self.plot_ylim_max_spin.setSingleStep(0.1)
+        self.plot_ylim_max_spin.setEnabled(False)
+        limits_row.addWidget(self.plot_ylim_max_spin)
+
+        self.plot_auto_limits_btn = QPushButton("Auto limits")
+        self.plot_auto_limits_btn.setEnabled(False)
+        self.plot_auto_limits_btn.clicked.connect(self._reset_plot_limits_auto)
+        limits_row.addWidget(self.plot_auto_limits_btn)
+        limits_row.addStretch()
+
+        self.plot_canvas_container = QWidget()
+        self.plot_canvas_layout = QVBoxLayout(self.plot_canvas_container)
+        self.plot_canvas_layout.setContentsMargins(0, 0, 0, 0)
+        self.plot_canvas_layout.setSpacing(4)
+        self.plot_canvas_container.setVisible(False)
+        analyze_group_layout.addWidget(self.plot_canvas_container)
+
+        self.analysis_canvas = None
+        self.analysis_toolbar = None
+        self._analysis_draw_cid = None
+        self._updating_plot_limits = False
+        self.plot_xlim_min_spin.valueChanged.connect(self._on_plot_limits_changed)
+        self.plot_xlim_max_spin.valueChanged.connect(self._on_plot_limits_changed)
+        self.plot_ylim_min_spin.valueChanged.connect(self._on_plot_limits_changed)
+        self.plot_ylim_max_spin.valueChanged.connect(self._on_plot_limits_changed)
+
         sim_compare_row = QHBoxLayout()
         analyze_group_layout.addLayout(sim_compare_row)
 
@@ -1350,10 +1454,11 @@ class EddyCurrentGUI(QWidget):
 
         # space for image preview (zoomable + pannable)
         self.image_label = ZoomLabel(gui_ref=self)
-        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.image_label.setMinimumHeight(300)
+        self.image_label.set_pan_enabled(False)
         scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
+        scroll.setWidgetResizable(False)
         scroll.setWidget(self.image_label)
         main_layout.addWidget(scroll)
 
@@ -4539,10 +4644,7 @@ class EddyCurrentGUI(QWidget):
         import matplotlib.pyplot as plt
         import numpy as np
 
-        colors_palette = [
-            'royalblue', 'firebrick', 'green', 
-            'orange', 'purple', 'brown', 'pink', 'gray'
-        ]
+        colors_palette = self._make_distinct_colors(len(self.compare_items))
 
         fig = plt.figure(figsize=(10, 6))
         line_width = self._time_domain_curve_line_width()
@@ -4551,7 +4653,7 @@ class EddyCurrentGUI(QWidget):
         for file_idx, (path, label) in enumerate(self.compare_items):
             try:
                 Be, BeddyFitted, tiempo, nDelays, g_axis, deadTime, acqTime, _, _ = sequenceAnalysis(path)
-                color = colors_palette[file_idx % len(colors_palette)]
+                color = colors_palette[file_idx]
                 legend_added = False
 
                 for n in range(nDelays):
@@ -4653,11 +4755,7 @@ class EddyCurrentGUI(QWidget):
             import matplotlib.pyplot as plt
             import numpy as np
             
-            # Define distinct colors for each file
-            colors_palette = [
-                'royalblue', 'firebrick', 'green', 
-                'orange', 'purple', 'brown', 'pink', 'gray'
-            ]
+            colors_palette = self._make_distinct_colors(len(self.compare_items))
             
             plt.figure(figsize=(10, 6))
             line_width = self._time_domain_curve_line_width()
@@ -4669,7 +4767,7 @@ class EddyCurrentGUI(QWidget):
                     Be, BeddyFitted, tiempo, nDelays, g_axis, deadTime, acqTime, _, _ = sequenceAnalysis(path)
                     
                     # Pick a color for this file
-                    color = colors_palette[file_idx % len(colors_palette)]
+                    color = colors_palette[file_idx]
                     
                     # Plot all delays (like nDelay_selected == "all")
                     legend_added = False
@@ -4770,9 +4868,18 @@ class EddyCurrentGUI(QWidget):
     #         )
 
     def reset_zoom(self):
+        if self.analysis_toolbar is not None and self.analysis_canvas is not None:
+            self.analysis_toolbar.home()
+            self._sync_plot_limit_controls_from_axes()
+            return
+
         # restore zoom on the image label
         if isinstance(self.image_label, ZoomLabel):
             self.image_label.reset_zoom()
+
+    def _set_plot_pan_mode(self, enabled):
+        if isinstance(getattr(self, "image_label", None), ZoomLabel):
+            self.image_label.set_pan_enabled(enabled)
 
     def _collect_case_custom_legends(self):
         labels = []
@@ -5460,6 +5567,13 @@ class EddyCurrentGUI(QWidget):
             new_rgb = rgb * (1.0 + amount)
         return tuple(new_rgb)
 
+    def _make_distinct_colors(self, n_colors):
+        if n_colors <= 0:
+            return []
+        import matplotlib.cm as cm
+        cmap = cm.get_cmap("hsv")
+        return [cmap(i / max(1, n_colors)) for i in range(n_colors)]
+
     def _resolve_case_folder_path(self, case_path, case_setup, case_phantom):
         setup_name = str(case_setup or "").strip()
         phantom_name = str(case_phantom or "").strip()
@@ -5497,12 +5611,112 @@ class EddyCurrentGUI(QWidget):
         import matplotlib.cm as cm
         cmap = cm.get_cmap(colormap.lower())
         upper = 0.70 if colormap == "Inferno" else 0.85
-        # Use a virtual palette of 32 slots so colors spread nicely
-        SLOTS = 32
-        start = self._plot_session_color_index
-        positions = [((start + i) % SLOTS) / SLOTS * upper for i in range(n_cases)]
-        self._plot_session_color_index = (start + n_cases) % SLOTS
+        # Golden-ratio stepping minimizes repeats across long sessions.
+        phi = 0.6180339887498949
+        start = int(self._plot_session_color_index)
+        positions = [(((start + i) * phi) % 1.0) * upper for i in range(n_cases)]
+        self._plot_session_color_index = start + n_cases
         return [cmap(p) for p in positions]
+
+    def _show_analysis_figure(self, fig):
+        if fig is None:
+            return
+
+        self.current_analysis_figure = fig
+
+        self.plot_xlim_min_spin.setEnabled(True)
+        self.plot_xlim_max_spin.setEnabled(True)
+        self.plot_ylim_min_spin.setEnabled(True)
+        self.plot_ylim_max_spin.setEnabled(True)
+        self.plot_auto_limits_btn.setEnabled(True)
+        self._sync_plot_limit_controls_from_axes()
+
+    def _current_analysis_axes(self):
+        if self.analysis_canvas is not None and self.analysis_canvas.figure is not None:
+            return [ax for ax in self.analysis_canvas.figure.axes if ax is not None]
+        fig = getattr(self, "current_analysis_figure", None)
+        if fig is None:
+            return []
+        return [ax for ax in fig.axes if ax is not None]
+
+    def _refresh_image_from_current_figure(self):
+        fig = getattr(self, "current_analysis_figure", None)
+        if fig is None:
+            return
+        import tempfile
+        tmp_file = os.path.join(tempfile.gettempdir(), "analysis_live_view.png")
+        fig.savefig(tmp_file, dpi=200)
+        self.image_label.setPixmap(QPixmap(tmp_file))
+
+    def _sync_plot_limit_controls_from_axes(self):
+        if self._updating_plot_limits:
+            return
+        axes = self._current_analysis_axes()
+        if not axes:
+            return
+
+        xmins, xmaxs, ymins, ymaxs = [], [], [], []
+        for ax in axes:
+            xl = ax.get_xlim()
+            yl = ax.get_ylim()
+            xmins.append(float(min(xl)))
+            xmaxs.append(float(max(xl)))
+            ymins.append(float(min(yl)))
+            ymaxs.append(float(max(yl)))
+
+        xmin, xmax = min(xmins), max(xmaxs)
+        ymin, ymax = min(ymins), max(ymaxs)
+        xspan = max(1e-6, xmax - xmin)
+        yspan = max(1e-6, ymax - ymin)
+
+        self._updating_plot_limits = True
+        try:
+            self.plot_xlim_min_spin.setRange(xmin - xspan * 3.0, xmax)
+            self.plot_xlim_max_spin.setRange(xmin, xmax + xspan * 3.0)
+            self.plot_ylim_min_spin.setRange(ymin - yspan * 3.0, ymax)
+            self.plot_ylim_max_spin.setRange(ymin, ymax + yspan * 3.0)
+
+            self.plot_xlim_min_spin.setValue(xmin)
+            self.plot_xlim_max_spin.setValue(xmax)
+            self.plot_ylim_min_spin.setValue(ymin)
+            self.plot_ylim_max_spin.setValue(ymax)
+        finally:
+            self._updating_plot_limits = False
+
+    def _on_plot_limits_changed(self):
+        if self._updating_plot_limits:
+            return
+        axes = self._current_analysis_axes()
+        if not axes:
+            return
+
+        xmin = float(self.plot_xlim_min_spin.value())
+        xmax = float(self.plot_xlim_max_spin.value())
+        ymin = float(self.plot_ylim_min_spin.value())
+        ymax = float(self.plot_ylim_max_spin.value())
+        if not (xmin < xmax and ymin < ymax):
+            return
+
+        for ax in axes:
+            ax.set_xlim(xmin, xmax)
+            ax.set_ylim(ymin, ymax)
+        if self.analysis_canvas is not None:
+            self.analysis_canvas.draw_idle()
+        else:
+            self._refresh_image_from_current_figure()
+
+    def _reset_plot_limits_auto(self):
+        axes = self._current_analysis_axes()
+        if not axes:
+            return
+        for ax in axes:
+            ax.relim()
+            ax.autoscale_view()
+        if self.analysis_canvas is not None:
+            self.analysis_canvas.draw_idle()
+        else:
+            self._refresh_image_from_current_figure()
+        self._sync_plot_limit_controls_from_axes()
 
     def _reset_plot_session(self):
         """Reset the sim overlay session and measured-data color counter."""
@@ -5523,7 +5737,8 @@ class EddyCurrentGUI(QWidget):
         colormap="Single-color gradient",
         use_subplots=False,
         save_dir=None,
-        save_plot=False
+        save_plot=False,
+        return_figure=False,
     ):
         import matplotlib.pyplot as plt
         from scipy import signal
@@ -5785,11 +6000,13 @@ class EddyCurrentGUI(QWidget):
         else:
             import tempfile
             output_path = os.path.join(tempfile.gettempdir(), filename)
-        self._maybe_compact_dimensions(plt.gcf())
-        self._maybe_customize_legends(plt.gcf())
-        self._maybe_customize_fonts(plt.gcf())
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        plt.close()
+        self._maybe_compact_dimensions(fig)
+        self._maybe_customize_legends(fig)
+        self._maybe_customize_fonts(fig)
+        fig.savefig(output_path, dpi=300, bbox_inches='tight')
+        if return_figure:
+            return output_path, fig
+        plt.close(fig)
         return output_path
 
     def _run_beddy_multi_case_all_phantoms(
@@ -5802,7 +6019,8 @@ class EddyCurrentGUI(QWidget):
         beprefilter_order,
         colormap="Single-color gradient",
         save_dir=None,
-        save_plot=False
+        save_plot=False,
+        return_figure=False,
     ):
         import matplotlib.pyplot as plt
         from scipy import signal
@@ -6036,6 +6254,8 @@ class EddyCurrentGUI(QWidget):
         self._maybe_customize_legends(fig)
         self._maybe_customize_fonts(fig)
         fig.savefig(output_path, dpi=300, bbox_inches='tight')
+        if return_figure:
+            return output_path, fig
         plt.close(fig)
         return output_path
 
@@ -6099,6 +6319,7 @@ class EddyCurrentGUI(QWidget):
         use_subplots=False,
         save_dir=None,
         save_plot=False,
+        return_figure=False,
     ):
         import matplotlib.pyplot as plt
         import tempfile
@@ -6297,6 +6518,8 @@ class EddyCurrentGUI(QWidget):
         self._maybe_customize_legends(fig)
         self._maybe_customize_fonts(fig)
         fig.savefig(output_path, dpi=250, bbox_inches='tight')
+        if return_figure:
+            return output_path, filename.replace(".png", ""), fig
         plt.close(fig)
         return output_path, filename.replace(".png", "")
 
@@ -6309,6 +6532,7 @@ class EddyCurrentGUI(QWidget):
         colormap="Single-color gradient",
         save_dir=None,
         save_plot=False,
+        return_figure=False,
     ):
         import matplotlib.pyplot as plt
         import tempfile
@@ -6499,6 +6723,8 @@ class EddyCurrentGUI(QWidget):
         self._maybe_customize_legends(fig)
         self._maybe_customize_fonts(fig)
         fig.savefig(output_path, dpi=250, bbox_inches='tight')
+        if return_figure:
+            return output_path, filename.replace('.png', ''), fig
         plt.close(fig)
         return output_path, filename.replace('.png', '')
 
@@ -6586,7 +6812,7 @@ class EddyCurrentGUI(QWidget):
 
                     use_subplots = bool(gradient == "All")
                     if forced_all_phantoms:
-                        img_path, out_name = self._run_beddy_exponential_fit_plot_all_phantoms(
+                        img_path, out_name, out_fig = self._run_beddy_exponential_fit_plot_all_phantoms(
                             cases=cases,
                             gradient=gradient,
                             ndelay=ndelay,
@@ -6594,9 +6820,10 @@ class EddyCurrentGUI(QWidget):
                             colormap=colormap_choice,
                             save_dir=self.comparison_save_dir,
                             save_plot=False,
+                            return_figure=True,
                         )
                     else:
-                        img_path, out_name = self._run_beddy_exponential_fit_plot(
+                        img_path, out_name, out_fig = self._run_beddy_exponential_fit_plot(
                             cases=cases,
                             gradient=gradient,
                             ndelay=ndelay,
@@ -6605,12 +6832,14 @@ class EddyCurrentGUI(QWidget):
                             use_subplots=use_subplots,
                             save_dir=self.comparison_save_dir,
                             save_plot=False,
+                            return_figure=True,
                         )
 
                     if img_path and os.path.exists(img_path):
                         pix = QPixmap(img_path)
                         self.image_label.setPixmap(pix)
-                        self.current_analysis_figure = None
+                        self._show_analysis_figure(out_fig)
+                        self.current_analysis_figure = out_fig
                         self.current_analysis_image_path = img_path
                         self.current_analysis_filename = out_name
                         self._refresh_compare_measured_columns()
@@ -6637,22 +6866,24 @@ class EddyCurrentGUI(QWidget):
                         if not ok:
                             return
                         cases = [current_case]
-                        img_path = self._run_beddy_multi_case_all_phantoms(
+                        img_path, out_fig = self._run_beddy_multi_case_all_phantoms(
                             cases=cases, gradient=gradient, ndelay=ndelay,
                             apply_filter=apply_filter,
                             beprefilter_cutoff=beprefilter_cutoff,
                             beprefilter_order=beprefilter_order,
                             colormap=colormap_choice,
-                            save_dir=self.comparison_save_dir, save_plot=False)
+                            save_dir=self.comparison_save_dir, save_plot=False,
+                            return_figure=True)
                     else:
                         single_phantom = forced_phantom_value if forced_single_phantom else main_case_phantom
-                        img_path = run_measured_analysis(
+                        img_path, out_fig = run_measured_analysis(
                             base_path=base_path, setup=setup,
                             phantom_position=single_phantom,
                             gradient_selected=gradient, nDelay_selected=ndelay,
                             apply_filter=apply_filter,
                             beprefilter_cutoff=beprefilter_cutoff,
-                            beprefilter_order=beprefilter_order, save_plot=False)
+                            beprefilter_order=beprefilter_order, save_plot=False,
+                            return_figure=True)
                 else:
                     # Multi-case path (either extra measured cases or sim-overlay session).
                     if use_add_case:
@@ -6676,33 +6907,33 @@ class EddyCurrentGUI(QWidget):
                         colormap_choice = self._multi_case_colormap or "Single-color gradient"
 
                     if forced_all_phantoms:
-                        img_path = self._run_beddy_multi_case_all_phantoms(
+                        img_path, out_fig = self._run_beddy_multi_case_all_phantoms(
                             cases=cases, gradient=gradient, ndelay=ndelay,
                             apply_filter=apply_filter,
                             beprefilter_cutoff=beprefilter_cutoff,
                             beprefilter_order=beprefilter_order,
                             colormap=colormap_choice,
-                            save_dir=self.comparison_save_dir, save_plot=False)
+                            save_dir=self.comparison_save_dir, save_plot=False,
+                            return_figure=True)
                     else:
-                        img_path = self._run_beddy_multi_case(
+                        img_path, out_fig = self._run_beddy_multi_case(
                             cases=cases, gradient=gradient, ndelay=ndelay,
                             apply_filter=apply_filter,
                             beprefilter_cutoff=beprefilter_cutoff,
                             beprefilter_order=beprefilter_order,
                             colormap=colormap_choice,
                             use_subplots=use_subplots,
-                            save_dir=self.comparison_save_dir, save_plot=False)
+                            save_dir=self.comparison_save_dir, save_plot=False,
+                            return_figure=True)
                 
                 if img_path and os.path.exists(img_path):
-                    # Load the figure for saving
                     pix = QPixmap(img_path)
                     self.image_label.setPixmap(pix)
-                    self.current_analysis_figure = None
+                    self._show_analysis_figure(out_fig)
+                    self.current_analysis_figure = out_fig
                     self.current_analysis_image_path = img_path
                     
                     # Store for later saving
-                    import matplotlib.pyplot as plt
-                    # Create a temporary figure from the saved image
                     if apply_filter:
                         cutoff_tag = f"bw_o{beprefilter_order}_w{int(round(beprefilter_cutoff * 100)):02d}"
                         if use_add_case:
@@ -6744,6 +6975,7 @@ class EddyCurrentGUI(QWidget):
                     fig.savefig(tmp_file, dpi=200, bbox_inches='tight')
                     pix = QPixmap(tmp_file)
                     self.image_label.setPixmap(pix)
+                    self._show_analysis_figure(fig)
                     
                     # Store figure for saving
                     self.current_analysis_figure = fig
@@ -6778,6 +7010,7 @@ class EddyCurrentGUI(QWidget):
                     fig.savefig(tmp_file, dpi=200, bbox_inches='tight')
                     pix = QPixmap(tmp_file)
                     self.image_label.setPixmap(pix)
+                    self._show_analysis_figure(fig)
                     
                     # Store figure for saving
                     self.current_analysis_figure = fig
