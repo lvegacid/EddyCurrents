@@ -34,10 +34,10 @@ from PyQt5.QtWidgets import (
     QComboBox, QMessageBox, QListWidget, QListWidgetItem, QInputDialog,
     QScrollArea, QCheckBox, QRubberBand, QDialog, QGroupBox,
     QSpinBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem,
-    QAbstractItemView,
+    QAbstractItemView, QTabWidget, QFormLayout, QColorDialog,
 )
-from PyQt5.QtGui import QPixmap, QKeySequence
-from PyQt5.QtCore import Qt, QSettings, QPoint, QRect
+from PyQt5.QtGui import QPixmap, QKeySequence, QColor
+from PyQt5.QtCore import Qt, QSettings, QPoint, QRect, QTimer
 
 from analysis.measured_analysis import (
     run_measured_analysis,
@@ -416,99 +416,761 @@ class _PostprocessAnalyzeDialog(QDialog):
             )
 
 
-class _ChangePlotParametersDialog(QDialog):
-    """Dialog to customize plot parameters used by Plot actions."""
+PLOT_COLOR_MODES = ("Default", "Single Color", "Viridis", "Inferno")
+PLOT_COLOR_MODE_LABELS = {
+    "Default": "Original/Default",
+    "Single Color": "Single Color",
+    "Viridis": "Viridis",
+    "Inferno": "Inferno",
+}
+PLOT_LEGEND_LOCATIONS = (
+    "Original", "best", "upper right", "upper left", "lower left", "lower right",
+    "right", "center left", "center right", "lower center", "upper center", "center",
+)
+# Annotation offsets (points) used by the plotting code. The editor values are
+# applied as a shift relative to these, so every annotation keeps its own layout.
+PLOT_ANNOTATION_BASE_OFFSET = (20.0, 12.0)
+_SPECIAL_LINE_KEYWORDS = ("reference", "noise floor", "background")
 
-    def __init__(self, initial_values=None, parent=None):
-        super().__init__(parent)
-        initial = dict(initial_values or {})
-        self.setWindowTitle("Change Plot Parameters")
-        self.setMinimumWidth(420)
+
+def _to_bool(value):
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes")
+    return bool(value)
+
+
+class PlotStyleConfig:
+    """Visual style of the plots. Defaults to the last style saved by the user."""
+
+    _FIELDS = (
+        ("width", float, 7.5),
+        ("height", float, 4.5),
+        ("font_title", int, 12),
+        ("font_axes", int, 10),
+        ("font_ticks", int, 8),
+        ("font_labels", int, 8),
+        ("font_legend", int, 10),
+        ("line_width", float, 1.8),
+        ("marker_size", float, 5.0),
+        ("xytext_x", float, PLOT_ANNOTATION_BASE_OFFSET[0]),
+        ("xytext_y", float, PLOT_ANNOTATION_BASE_OFFSET[1]),
+        ("legend_loc", str, "Original"),
+        ("color_mode", str, "Default"),
+        ("single_color", str, "#0055ff"),
+    )
+
+    def __init__(self):
+        self.settings = QSettings("MRI_Analysis", "PlotStyles")
+        self.load_defaults()
+
+    def load_defaults(self):
+        # Until the user saves a style, new figures keep their original look.
+        self.customized = _to_bool(self.settings.value("customized", False))
+        for name, cast, default in self._FIELDS:
+            try:
+                value = cast(self.settings.value(name, default))
+            except (TypeError, ValueError):
+                value = default
+            setattr(self, name, value)
+        if self.color_mode not in PLOT_COLOR_MODES:
+            self.color_mode = "Default"
+        if self.legend_loc not in PLOT_LEGEND_LOCATIONS:
+            self.legend_loc = "Original"
+        if not QColor(self.single_color).isValid():
+            self.single_color = "#0055ff"
+
+    def save_defaults(self):
+        for name, _cast, _default in self._FIELDS:
+            self.settings.setValue(name, getattr(self, name))
+        self.settings.setValue("customized", True)
+        self.customized = True
+        self.settings.sync()
+
+    def clear_saved(self):
+        self.settings.clear()
+        self.settings.sync()
+        self.load_defaults()
+
+    def signature(self):
+        return tuple(getattr(self, name) for name, _cast, _default in self._FIELDS)
+
+    def seed_from_figure(self, fig):
+        """Fill the (unsaved) values from the look of an existing figure."""
+        if fig is None or not fig.axes:
+            return
+        snap = _snapshot_figure_style(fig)
+        width, height = snap["size"]
+        self.width, self.height = round(float(width), 2), round(float(height), 2)
+        ax0 = fig.axes[0]
+        title_art = _primary_title_artist(fig)
+        sizes = snap["axes"][0] if snap["axes"] else {}
+
+        def _clamp_int(value, fallback):
+            try:
+                return int(min(72, max(1, round(float(value)))))
+            except (TypeError, ValueError):
+                return fallback
+
+        self.font_title = _clamp_int(title_art.get_fontsize(), self.font_title)
+        self.font_axes = _clamp_int(ax0.xaxis.label.get_fontsize(), self.font_axes)
+        if sizes.get("xtick") is not None:
+            self.font_ticks = _clamp_int(sizes["xtick"], self.font_ticks)
+        for ax_snap in snap["axes"]:
+            if ax_snap["legend_sizes"]:
+                self.font_legend = _clamp_int(ax_snap["legend_sizes"][0], self.font_legend)
+                break
+        for ax_snap in snap["axes"]:
+            if ax_snap["text_sizes"]:
+                self.font_labels = _clamp_int(ax_snap["text_sizes"][0][1], self.font_labels)
+                break
+        for _art, kind, props in snap["artists"]:
+            if kind == "line" and not props["special"]:
+                if props["visible_line"]:
+                    self.line_width = round(float(props["linewidth"]), 1)
+                    break
+        for _art, kind, props in snap["artists"]:
+            if kind == "line" and not props["special"] and props["has_marker"]:
+                self.marker_size = round(float(props["markersize"]), 1)
+                break
+        self.xytext_x, self.xytext_y = PLOT_ANNOTATION_BASE_OFFSET
+        self.legend_loc = "Original"
+        self.color_mode = "Default"
+
+
+def _primary_title_artist(fig):
+    suptitle = getattr(fig, "_suptitle", None)
+    if suptitle is not None and suptitle.get_text():
+        return suptitle
+    return fig.axes[0].title if fig.axes else suptitle
+
+
+def _is_achromatic_mid_gray(rgba):
+    r, g, b = rgba[:3]
+    return max(r, g, b) - min(r, g, b) < 0.02 and 0.3 <= r <= 0.8
+
+
+def _is_special_line(line, rgba):
+    """Reference / noise floor / background style lines keep a fixed gray look."""
+    label = str(line.get_label() or "").strip().lower()
+    if any(key in label for key in _SPECIAL_LINE_KEYWORDS):
+        return True
+    try:
+        xd, yd = line.get_xdata(orig=True), line.get_ydata(orig=True)
+        if len(xd) == 2 and len(yd) == 2 and (xd[0] == xd[1] or yd[0] == yd[1]):
+            return True
+    except Exception:
+        pass
+    return _is_achromatic_mid_gray(rgba)
+
+
+def _color_key(rgba):
+    return tuple(round(float(c), 3) for c in rgba[:3])
+
+
+def _snapshot_figure_style(fig):
+    """Record the original look of a figure once, so edits are always relative to it."""
+    snap = getattr(fig, "_eddy_style_snapshot", None)
+    if snap is not None:
+        return snap
+
+    import matplotlib.colors as mcolors
+    from matplotlib.collections import Collection, PathCollection
+    from matplotlib.text import Annotation
+
+    none_styles = (None, "", "None", "none", " ")
+    snap = {
+        "size": tuple(float(v) for v in fig.get_size_inches()),
+        "axes": [],
+        "artists": [],
+        "suptitle": None,
+        "fig_texts": [],
+    }
+
+    suptitle = getattr(fig, "_suptitle", None)
+    if suptitle is not None:
+        snap["suptitle"] = (suptitle.get_text(), suptitle.get_fontsize())
+    snap["fig_texts"] = [(t, t.get_fontsize()) for t in fig.texts]
+
+    for ax in fig.axes:
+        legend = ax.get_legend()
+        xticks, yticks = ax.get_xticklabels(), ax.get_yticklabels()
+        ax_snap = {
+            "ax": ax,
+            "position": ax.get_position().frozen(),
+            "title": ax.title.get_text(),
+            "title_size": ax.title.get_fontsize(),
+            "xlabel_size": ax.xaxis.label.get_fontsize(),
+            "ylabel_size": ax.yaxis.label.get_fontsize(),
+            "xtick": xticks[0].get_fontsize() if xticks else None,
+            "ytick": yticks[0].get_fontsize() if yticks else None,
+            "legend_loc": getattr(legend, "_loc", None) if legend is not None else None,
+            "legend_sizes": [t.get_fontsize() for t in legend.get_texts()] if legend is not None else [],
+            "text_sizes": [],
+        }
+        for txt in ax.texts:
+            offset = None
+            if isinstance(txt, Annotation) and getattr(txt, "anncoords", None) == "offset points":
+                offset = tuple(float(v) for v in txt.get_position())
+            ax_snap["text_sizes"].append((txt, txt.get_fontsize(), offset))
+        # Tuples are (artist, size, offset); seed_from_figure reads index 1.
+        snap["axes"].append(ax_snap)
+
+        for line in ax.get_lines():
+            rgba = mcolors.to_rgba(line.get_color())
+            snap["artists"].append((line, "line", {
+                "color": rgba,
+                "linewidth": line.get_linewidth(),
+                "markersize": line.get_markersize(),
+                "linestyle": line.get_linestyle(),
+                "mfc": line.get_markerfacecolor(),
+                "mec": line.get_markeredgecolor(),
+                "special": _is_special_line(line, rgba),
+                "visible_line": line.get_linestyle() not in none_styles,
+                "has_marker": line.get_marker() not in none_styles,
+            }))
+
+        for coll in ax.collections:
+            if not isinstance(coll, Collection):
+                continue
+            snap["artists"].append((coll, "collection", {
+                "face": np.array(coll.get_facecolor(), dtype=float),
+                "edge": np.array(coll.get_edgecolor(), dtype=float),
+                "sizes": np.array(coll.get_sizes(), dtype=float) if isinstance(coll, PathCollection) else None,
+            }))
+
+        for patch in ax.patches:
+            snap["artists"].append((patch, "patch", {
+                "face": tuple(patch.get_facecolor()),
+            }))
+
+    fig._eddy_style_snapshot = snap
+    return snap
+
+
+def _palette_colors(n_groups, mode, single_color):
+    """Return n_groups RGB tuples for the selected palette (None keeps the original)."""
+    import matplotlib
+    import matplotlib.colors as mcolors
+
+    if n_groups <= 0 or mode == "Default":
+        return None
+    if mode == "Single Color":
+        base = np.array(mcolors.to_rgb(single_color), dtype=float)
+        amounts = np.linspace(0.0, 0.65, n_groups) if n_groups > 1 else [0.0]
+        return [tuple(base + (1.0 - base) * float(a)) for a in amounts]
+
+    cmap = matplotlib.colormaps[mode.lower()]
+    upper = 0.70 if mode == "Inferno" else 0.85
+    positions = np.linspace(0.0, upper, n_groups) if n_groups > 1 else [0.3]
+    return [tuple(cmap(float(p))[:3]) for p in positions]
+
+
+def _remap_rgba_array(arr, color_map):
+    """Remap every row of an RGBA array; None when no row has a mapped color."""
+    out = np.array(arr, dtype=float, copy=True)
+    changed = False
+    for i in range(out.shape[0]):
+        new_rgb = color_map.get(_color_key(out[i]))
+        if new_rgb is not None:
+            out[i, :3] = new_rgb
+            changed = True
+    return out if changed else None
+
+
+def _sync_legend_handle_colors(ax):
+    """Legend handles are copies; keep their colors in sync with the plotted artists."""
+    legend = ax.get_legend()
+    if legend is None:
+        return
+    from matplotlib.lines import Line2D
+
+    handles, labels = ax.get_legend_handles_labels()
+    legend_handles = list(getattr(legend, "legend_handles", None) or getattr(legend, "legendHandles", []))
+    texts = legend.get_texts()
+    by_label = {}
+    for h, lab in zip(handles, labels):
+        by_label.setdefault(lab, h)
+
+    for idx, dst in enumerate(legend_handles):
+        if len(handles) == len(legend_handles):
+            src = handles[idx]
+        else:
+            src = by_label.get(texts[idx].get_text()) if idx < len(texts) else None
+        if src is None:
+            continue
+        try:
+            if hasattr(src, "patches") and src.patches:
+                src = src.patches[0]
+            if isinstance(src, Line2D) and isinstance(dst, Line2D):
+                dst.set_color(src.get_color())
+                if src.get_markerfacecolor() not in ("auto", None):
+                    dst.set_markerfacecolor(src.get_markerfacecolor())
+                if src.get_markeredgecolor() not in ("auto", None):
+                    dst.set_markeredgecolor(src.get_markeredgecolor())
+            elif hasattr(src, "get_facecolor") and hasattr(dst, "set_facecolor") and not isinstance(dst, Line2D):
+                face = np.array(src.get_facecolor())
+                dst.set_facecolor(face[0] if face.ndim > 1 and len(face) else face)
+        except Exception:
+            continue
+
+
+def _relayout_figure(fig):
+    import warnings
+
+    get_engine = getattr(fig, "get_layout_engine", None)
+    if get_engine is not None and get_engine() is not None:
+        return
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fig.tight_layout(pad=1.5)
+    except Exception:
+        pass
+
+
+def apply_plot_style(fig, cfg, title_text=None):
+    """Apply a PlotStyleConfig to an existing figure without re-running any analysis.
+
+    Every value is derived from the original look of the figure (snapshot), so the
+    function is idempotent and can be called repeatedly while editing.
+    """
+    if fig is None:
+        return
+    from matplotlib.text import Annotation
+
+    snap = _snapshot_figure_style(fig)
+    mode = cfg.color_mode
+
+    # One palette slot per distinct original color, in order of appearance.
+    keys = []
+    for _art, kind, props in snap["artists"]:
+        if kind == "line":
+            if props["special"]:
+                continue
+            key = _color_key(props["color"])
+        elif kind == "collection":
+            if len(props["face"]) != 1:
+                continue
+            key = _color_key(props["face"][0])
+        else:
+            if props["face"][3] == 0:
+                continue
+            key = _color_key(props["face"])
+        if key not in keys:
+            keys.append(key)
+    palette = _palette_colors(len(keys), mode, cfg.single_color)
+    color_map = dict(zip(keys, palette)) if palette else {}
+
+    marker_size = float(cfg.marker_size)
+    for art, kind, props in snap["artists"]:
+        if kind == "line":
+            line = art
+            if props["special"]:
+                if mode == "Default":
+                    line.set_color(props["color"])
+                    line.set_linestyle(props["linestyle"])
+                else:
+                    line.set_color("gray")
+                    line.set_linestyle("--")
+                continue
+            if props["visible_line"]:
+                line.set_linewidth(float(cfg.line_width))
+            if props["has_marker"]:
+                line.set_markersize(marker_size)
+            new_rgb = color_map.get(_color_key(props["color"]))
+            rgba = props["color"] if new_rgb is None else (*new_rgb, props["color"][3])
+            line.set_color(rgba)
+            for attr, raw in (("markerfacecolor", props["mfc"]), ("markeredgecolor", props["mec"])):
+                if new_rgb is not None and raw not in ("auto", None, "none", "None"):
+                    getattr(line, f"set_{attr}")((*new_rgb, 1.0))
+                else:
+                    getattr(line, f"set_{attr}")(raw)
+        elif kind == "collection":
+            coll = art
+            for attr, orig in (("facecolor", props["face"]), ("edgecolor", props["edge"])):
+                remapped = _remap_rgba_array(orig, color_map) if color_map else None
+                getattr(coll, f"set_{attr}")(orig if remapped is None else remapped)
+            if props["sizes"] is not None:
+                n = max(1, len(props["sizes"]))
+                coll.set_sizes(np.full(n, marker_size ** 2))
+        else:
+            patch = art
+            face = np.array(props["face"], dtype=float)[None, :]
+            remapped = _remap_rgba_array(face, color_map) if color_map else None
+            patch.set_facecolor(tuple(face[0] if remapped is None else remapped[0]))
+
+    shift_x = float(cfg.xytext_x) - PLOT_ANNOTATION_BASE_OFFSET[0]
+    shift_y = float(cfg.xytext_y) - PLOT_ANNOTATION_BASE_OFFSET[1]
+    for ax_snap in snap["axes"]:
+        ax = ax_snap["ax"]
+        ax.title.set_fontsize(cfg.font_title)
+        ax.xaxis.label.set_fontsize(cfg.font_axes)
+        ax.yaxis.label.set_fontsize(cfg.font_axes)
+        ax.tick_params(axis="both", labelsize=cfg.font_ticks)
+
+        for txt, _size, offset in ax_snap["text_sizes"]:
+            txt.set_fontsize(cfg.font_labels)
+            if offset is not None and isinstance(txt, Annotation):
+                txt.set_position((offset[0] + shift_x, offset[1] + shift_y))
+
+        legend = ax.get_legend()
+        if legend is not None:
+            for txt in legend.get_texts():
+                txt.set_fontsize(cfg.font_legend)
+            if legend.get_title() is not None:
+                legend.get_title().set_fontsize(cfg.font_legend)
+            wanted_loc = ax_snap["legend_loc"] if cfg.legend_loc == "Original" else cfg.legend_loc
+            if wanted_loc is not None:
+                try:
+                    legend.set_loc(wanted_loc)
+                except Exception:
+                    pass
+            _sync_legend_handle_colors(ax)
+
+    for leg in getattr(fig, "legends", []):
+        for txt in leg.get_texts():
+            txt.set_fontsize(cfg.font_legend)
+
+    suptitle = getattr(fig, "_suptitle", None)
+    if suptitle is not None:
+        suptitle.set_fontsize(cfg.font_title)
+    for txt, _size in snap["fig_texts"]:
+        txt.set_fontsize(cfg.font_labels)
+
+    if title_text is not None and fig.axes:
+        target = _primary_title_artist(fig)
+        if target is not None:
+            target.set_text(title_text)
+
+    if cfg.width > 0 and cfg.height > 0:
+        fig.set_size_inches(float(cfg.width), float(cfg.height), forward=True)
+    _relayout_figure(fig)
+    fig._eddy_style_applied_key = cfg.signature()
+
+
+def restore_plot_style(fig):
+    """Undo apply_plot_style, returning the figure to how it was first rendered."""
+    snap = getattr(fig, "_eddy_style_snapshot", None)
+    if fig is None or snap is None:
+        return
+
+    for art, kind, props in snap["artists"]:
+        if kind == "line":
+            art.set_color(props["color"])
+            art.set_linewidth(props["linewidth"])
+            art.set_markersize(props["markersize"])
+            art.set_linestyle(props["linestyle"])
+            art.set_markerfacecolor(props["mfc"])
+            art.set_markeredgecolor(props["mec"])
+        elif kind == "collection":
+            art.set_facecolor(props["face"])
+            art.set_edgecolor(props["edge"])
+            if props["sizes"] is not None:
+                art.set_sizes(props["sizes"])
+        else:
+            art.set_facecolor(props["face"])
+
+    for ax_snap in snap["axes"]:
+        ax = ax_snap["ax"]
+        ax.title.set_text(ax_snap["title"])
+        ax.title.set_fontsize(ax_snap["title_size"])
+        ax.xaxis.label.set_fontsize(ax_snap["xlabel_size"])
+        ax.yaxis.label.set_fontsize(ax_snap["ylabel_size"])
+        if ax_snap["xtick"] is not None:
+            ax.tick_params(axis="x", labelsize=ax_snap["xtick"])
+        if ax_snap["ytick"] is not None:
+            ax.tick_params(axis="y", labelsize=ax_snap["ytick"])
+        for txt, size, offset in ax_snap["text_sizes"]:
+            txt.set_fontsize(size)
+            if offset is not None:
+                txt.set_position(offset)
+        legend = ax.get_legend()
+        if legend is not None:
+            for txt, size in zip(legend.get_texts(), ax_snap["legend_sizes"]):
+                txt.set_fontsize(size)
+            if ax_snap["legend_loc"] is not None:
+                try:
+                    legend.set_loc(ax_snap["legend_loc"])
+                except Exception:
+                    pass
+            _sync_legend_handle_colors(ax)
+        ax.set_position(ax_snap["position"])
+
+    suptitle = getattr(fig, "_suptitle", None)
+    if suptitle is not None and snap["suptitle"] is not None:
+        suptitle.set_text(snap["suptitle"][0])
+        suptitle.set_fontsize(snap["suptitle"][1])
+    for txt, size in snap["fig_texts"]:
+        txt.set_fontsize(size)
+
+    fig.set_size_inches(*snap["size"], forward=True)
+    fig._eddy_style_applied_key = None
+
+
+class PlotEditorDialog(QDialog):
+    """Non-modal editor that restyles the current figure live ("Modify Plot")."""
+
+    PREVIEW_DELAY_MS = 150
+
+    def __init__(self, gui, parent=None):
+        super().__init__(parent or gui)
+        self._gui = gui
+        self._fig = None
+        self._title_dirty = False
+        self._loading = False
+        self.config = gui.plot_style_config
+
+        self.setWindowTitle("Modify Plot / Change Style")
+        self.setMinimumWidth(380)
+        self.setModal(False)
+
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(self.PREVIEW_DELAY_MS)
+        self._preview_timer.timeout.connect(self._refresh_preview)
 
         layout = QVBoxLayout(self)
-
-        size_group = QGroupBox("Sizes")
-        size_layout = QVBoxLayout(size_group)
-
-        font_row = QHBoxLayout()
-        font_row.addWidget(QLabel("Font size:"))
-        self.font_size_spin = QSpinBox()
-        self.font_size_spin.setRange(1, 72)
-        self.font_size_spin.setValue(int(initial.get("font_size", 12)))
-        font_row.addWidget(self.font_size_spin)
-        font_row.addStretch()
-        size_layout.addLayout(font_row)
-
-        marker_row = QHBoxLayout()
-        marker_row.addWidget(QLabel("Marker size (plot points):"))
-        self.marker_size_spin = QDoubleSpinBox()
-        self.marker_size_spin.setDecimals(1)
-        self.marker_size_spin.setRange(0.5, 25.0)
-        self.marker_size_spin.setSingleStep(0.5)
-        self.marker_size_spin.setValue(float(initial.get("marker_size", 5.0)))
-        marker_row.addWidget(self.marker_size_spin)
-        marker_row.addStretch()
-        size_layout.addLayout(marker_row)
-
-        line_row = QHBoxLayout()
-        line_row.addWidget(QLabel("Line Width:"))
-        self.line_width_spin = QDoubleSpinBox()
-        self.line_width_spin.setDecimals(1)
-        self.line_width_spin.setRange(0.1, 20.0)
-        self.line_width_spin.setSingleStep(0.1)
-        self.line_width_spin.setValue(float(initial.get("line_width", 1.5)))
-        line_row.addWidget(self.line_width_spin)
-        line_row.addStretch()
-        size_layout.addLayout(line_row)
-
-        layout.addWidget(size_group)
-
-        xy_group = QGroupBox("xytext (annotation offset in points)")
-        xy_layout = QVBoxLayout(xy_group)
-
-        x_row = QHBoxLayout()
-        x_row.addWidget(QLabel("X:"))
-        self.xytext_x_spin = QDoubleSpinBox()
-        self.xytext_x_spin.setDecimals(1)
-        self.xytext_x_spin.setRange(-100.0, 100.0)
-        self.xytext_x_spin.setSingleStep(1.0)
-        self.xytext_x_spin.setValue(float(initial.get("xytext_x", 20.0)))
-        x_row.addWidget(self.xytext_x_spin)
-        x_row.addStretch()
-        xy_layout.addLayout(x_row)
-
-        y_row = QHBoxLayout()
-        y_row.addWidget(QLabel("Y:"))
-        self.xytext_y_spin = QDoubleSpinBox()
-        self.xytext_y_spin.setDecimals(1)
-        self.xytext_y_spin.setRange(-100.0, 100.0)
-        self.xytext_y_spin.setSingleStep(1.0)
-        self.xytext_y_spin.setValue(float(initial.get("xytext_y", 12.0)))
-        y_row.addWidget(self.xytext_y_spin)
-        y_row.addStretch()
-        xy_layout.addLayout(y_row)
-
-        layout.addWidget(xy_group)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+        self._build_text_tab()
+        self._build_geometry_tab()
+        self._build_palette_tab()
 
         btn_row = QHBoxLayout()
+        reset_btn = QPushButton("Reset to original")
+        reset_btn.setToolTip("Restore the original look of this plot and forget the saved style")
+        reset_btn.clicked.connect(self.reset_style)
+        btn_row.addWidget(reset_btn)
         btn_row.addStretch()
-        ok_btn = QPushButton("OK")
-        ok_btn.setDefault(True)
-        ok_btn.clicked.connect(self.accept)
-        btn_row.addWidget(ok_btn)
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
-        btn_row.addWidget(cancel_btn)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
 
-    def values(self):
-        return {
-            "font_size": int(self.font_size_spin.value()),
-            "xytext_x": float(self.xytext_x_spin.value()),
-            "xytext_y": float(self.xytext_y_spin.value()),
-            "marker_size": float(self.marker_size_spin.value()),
-            "line_width": float(self.line_width_spin.value()),
-        }
+        self.sync_from_figure()
+
+    # ---- UI construction -------------------------------------------------
+    @staticmethod
+    def _double_spin(minimum, maximum, step, decimals=1):
+        spin = QDoubleSpinBox()
+        spin.setDecimals(decimals)
+        spin.setRange(minimum, maximum)
+        spin.setSingleStep(step)
+        return spin
+
+    @staticmethod
+    def _int_spin(minimum, maximum):
+        spin = QSpinBox()
+        spin.setRange(minimum, maximum)
+        return spin
+
+    def _build_text_tab(self):
+        page = QWidget()
+        form = QFormLayout(page)
+        self.width_spin = self._double_spin(1.0, 60.0, 0.5, 2)
+        self.height_spin = self._double_spin(1.0, 60.0, 0.5, 2)
+        self.title_edit = QLineEdit()
+        self.title_font_spin = self._int_spin(1, 72)
+        self.axes_font_spin = self._int_spin(1, 72)
+        self.ticks_font_spin = self._int_spin(1, 72)
+        form.addRow("Plot width (in):", self.width_spin)
+        form.addRow("Plot height (in):", self.height_spin)
+        form.addRow("Title text:", self.title_edit)
+        form.addRow("Title font size:", self.title_font_spin)
+        form.addRow("Axis label font size:", self.axes_font_spin)
+        form.addRow("Ticks font size:", self.ticks_font_spin)
+        self.tabs.addTab(page, "Dimensions && Text")
+
+        for spin in (self.width_spin, self.height_spin):
+            spin.valueChanged.connect(self.apply_live_style_update)
+        for spin in (self.title_font_spin, self.axes_font_spin, self.ticks_font_spin):
+            spin.valueChanged.connect(self.apply_live_style_update)
+        self.title_edit.textChanged.connect(self._on_title_changed)
+
+    def _build_geometry_tab(self):
+        page = QWidget()
+        form = QFormLayout(page)
+        self.line_width_spin = self._double_spin(0.5, 10.0, 0.1)
+        self.marker_size_spin = self._double_spin(1.0, 20.0, 0.5)
+        self.xytext_x_spin = self._double_spin(-100.0, 100.0, 1.0)
+        self.xytext_y_spin = self._double_spin(-100.0, 100.0, 1.0)
+        self.annotation_font_spin = self._int_spin(1, 72)
+        self.legend_font_spin = self._int_spin(1, 72)
+        self.legend_loc_combo = QComboBox()
+        self.legend_loc_combo.addItems(list(PLOT_LEGEND_LOCATIONS))
+        offset_tip = "Annotation offset in points (20, 12 keeps the original layout)"
+        self.xytext_x_spin.setToolTip(offset_tip)
+        self.xytext_y_spin.setToolTip(offset_tip)
+        form.addRow("Line width (pt):", self.line_width_spin)
+        form.addRow("Marker size (pt):", self.marker_size_spin)
+        form.addRow("Annotation offset X:", self.xytext_x_spin)
+        form.addRow("Annotation offset Y:", self.xytext_y_spin)
+        form.addRow("Annotation font size:", self.annotation_font_spin)
+        form.addRow("Legend font size:", self.legend_font_spin)
+        form.addRow("Legend position:", self.legend_loc_combo)
+        self.tabs.addTab(page, "Geometry && Markers")
+
+        for spin in (self.line_width_spin, self.marker_size_spin, self.xytext_x_spin, self.xytext_y_spin):
+            spin.valueChanged.connect(self.apply_live_style_update)
+        for spin in (self.annotation_font_spin, self.legend_font_spin):
+            spin.valueChanged.connect(self.apply_live_style_update)
+        self.legend_loc_combo.currentIndexChanged.connect(self.apply_live_style_update)
+
+    def _build_palette_tab(self):
+        page = QWidget()
+        form = QFormLayout(page)
+        self.palette_combo = QComboBox()
+        for mode in PLOT_COLOR_MODES:
+            self.palette_combo.addItem(PLOT_COLOR_MODE_LABELS[mode], mode)
+        self.color_btn = QPushButton("Choose color...")
+        self.color_btn.clicked.connect(self._choose_single_color)
+        form.addRow("Palette:", self.palette_combo)
+        form.addRow("Single color:", self.color_btn)
+        note = QLabel(
+            "Reference / noise floor / background lines always stay gray and dashed\n"
+            "when a palette other than the original is selected."
+        )
+        note.setWordWrap(True)
+        form.addRow(note)
+        self.tabs.addTab(page, "Color palette")
+
+        self.palette_combo.currentIndexChanged.connect(self._on_palette_changed)
+
+    # ---- state <-> controls ---------------------------------------------
+    def _set_color_button(self, color_hex):
+        self.color_btn.setStyleSheet(f"background-color: {color_hex}; color: {'#000' if QColor(color_hex).lightness() > 128 else '#fff'};")
+
+    def _controls(self):
+        return (
+            self.width_spin, self.height_spin, self.title_edit, self.title_font_spin,
+            self.axes_font_spin, self.ticks_font_spin, self.line_width_spin,
+            self.marker_size_spin, self.xytext_x_spin, self.xytext_y_spin,
+            self.annotation_font_spin, self.legend_font_spin, self.legend_loc_combo,
+            self.palette_combo,
+        )
+
+    def sync_from_figure(self):
+        """Load the controls from the saved style (or from the figure if none is saved)."""
+        fig = getattr(self._gui, "current_analysis_figure", None)
+        self._fig = fig
+        cfg = self.config
+        if not cfg.customized:
+            cfg.load_defaults()
+            if fig is not None:
+                cfg.seed_from_figure(fig)
+
+        self._loading = True
+        controls = self._controls()
+        for ctrl in controls:
+            ctrl.blockSignals(True)
+        try:
+            self.width_spin.setValue(cfg.width)
+            self.height_spin.setValue(cfg.height)
+            self.title_font_spin.setValue(cfg.font_title)
+            self.axes_font_spin.setValue(cfg.font_axes)
+            self.ticks_font_spin.setValue(cfg.font_ticks)
+            self.annotation_font_spin.setValue(cfg.font_labels)
+            self.legend_font_spin.setValue(cfg.font_legend)
+            self.line_width_spin.setValue(cfg.line_width)
+            self.marker_size_spin.setValue(cfg.marker_size)
+            self.xytext_x_spin.setValue(cfg.xytext_x)
+            self.xytext_y_spin.setValue(cfg.xytext_y)
+            self.legend_loc_combo.setCurrentText(cfg.legend_loc)
+            self.palette_combo.setCurrentIndex(max(0, self.palette_combo.findData(cfg.color_mode)))
+            self._sync_title_from_figure()
+            self._set_color_button(cfg.single_color)
+            self.color_btn.setEnabled(cfg.color_mode == "Single Color")
+        finally:
+            for ctrl in controls:
+                ctrl.blockSignals(False)
+            self._loading = False
+
+    def _sync_title_from_figure(self):
+        fig = self._fig
+        title = ""
+        if fig is not None and fig.axes:
+            title_art = _primary_title_artist(fig)
+            title = title_art.get_text() if title_art is not None else ""
+        self.title_edit.blockSignals(True)
+        self.title_edit.setText(title)
+        self.title_edit.blockSignals(False)
+        self._title_dirty = False
+
+    def _read_controls_into_config(self):
+        cfg = self.config
+        cfg.width = float(self.width_spin.value())
+        cfg.height = float(self.height_spin.value())
+        cfg.font_title = int(self.title_font_spin.value())
+        cfg.font_axes = int(self.axes_font_spin.value())
+        cfg.font_ticks = int(self.ticks_font_spin.value())
+        cfg.font_labels = int(self.annotation_font_spin.value())
+        cfg.font_legend = int(self.legend_font_spin.value())
+        cfg.line_width = float(self.line_width_spin.value())
+        cfg.marker_size = float(self.marker_size_spin.value())
+        cfg.xytext_x = float(self.xytext_x_spin.value())
+        cfg.xytext_y = float(self.xytext_y_spin.value())
+        cfg.legend_loc = self.legend_loc_combo.currentText()
+        cfg.color_mode = self.palette_combo.currentData() or "Default"
+
+    # ---- slots ------------------------------------------------------------
+    def _on_title_changed(self, _text=""):
+        if self._loading:
+            return
+        self._title_dirty = True
+        self.apply_live_style_update()
+
+    def _on_palette_changed(self, _index=0):
+        mode = self.palette_combo.currentData()
+        self.color_btn.setEnabled(mode == "Single Color")
+        self.apply_live_style_update()
+
+    def _choose_single_color(self):
+        color = QColorDialog.getColor(QColor(self.config.single_color), self, "Select plot color")
+        if not color.isValid():
+            return
+        self.config.single_color = color.name()
+        self._set_color_button(self.config.single_color)
+        self.apply_live_style_update()
+
+    def apply_live_style_update(self, *_args):
+        """Restyle the existing figure in place (no analysis is re-run) and refresh the view."""
+        if self._loading:
+            return
+        fig = getattr(self._gui, "current_analysis_figure", None)
+        if fig is None:
+            return
+        if fig is not self._fig:
+            # A new plot was generated while the editor was open.
+            if not self.config.customized:
+                self.sync_from_figure()
+                return
+            self._fig = fig
+            self._sync_title_from_figure()
+
+        self._read_controls_into_config()
+        self.config.save_defaults()
+        try:
+            apply_plot_style(fig, self.config, self.title_edit.text() if self._title_dirty else None)
+        except Exception as e:
+            print(f"[ERROR] apply_live_style_update: {e}")
+            return
+        self._preview_timer.start()
+
+    def _refresh_preview(self):
+        self._gui._refresh_image_from_current_figure()
+
+    def reset_style(self):
+        fig = getattr(self._gui, "current_analysis_figure", None)
+        self.config.clear_saved()
+        if fig is not None:
+            restore_plot_style(fig)
+            self._gui._refresh_image_from_current_figure()
+        self.sync_from_figure()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if getattr(self._gui, "current_analysis_figure", None) is not self._fig:
+            self.sync_from_figure()
 
 
 class ZoomLabel(QLabel):
@@ -898,6 +1560,8 @@ class EddyCurrentGUI(QWidget):
 
         # load last base path suggestion once the path_edit exists
         self.settings = QSettings("EddyCurrents", "EddyGUI")
+        self.plot_style_config = PlotStyleConfig()
+        self._plot_editor = None
         last = self.settings.value("last_base_path", "")
         if last:
             self.base_path = last
@@ -1160,14 +1824,6 @@ class EddyCurrentGUI(QWidget):
         self.analyze_change_legend_checkbox = QCheckBox("Change legend")
         analyze_row.addWidget(self.analyze_change_legend_checkbox)
 
-        analyze_row.addSpacing(12)
-        self.analyze_change_dimensions_checkbox = QCheckBox("Change dimensions")
-        analyze_row.addWidget(self.analyze_change_dimensions_checkbox)
-
-        analyze_row.addSpacing(12)
-        self.analyze_change_font_checkbox = QCheckBox("Change plot parameters")
-        analyze_row.addWidget(self.analyze_change_font_checkbox)
-
         analyze_row.addStretch()
 
         analyze_btn = QPushButton("Plot")
@@ -1364,13 +2020,7 @@ class EddyCurrentGUI(QWidget):
         self.change_legend_checkbox = QCheckBox("Change legend")
         compare_row.addWidget(self.change_legend_checkbox)
 
-        compare_row.addSpacing(12)
-        self.change_dimensions_checkbox = QCheckBox("Change dimensions")
-        compare_row.addWidget(self.change_dimensions_checkbox)
-
         self.compare_grad_combo.addItems(["X", "Y", "Z", "All"])
-        self.change_font_checkbox = QCheckBox("Change plot parameters")
-        compare_row.addWidget(self.change_font_checkbox)
 
         compare_row.addSpacing(12)
         self.xlim_50mm_checkbox = QCheckBox("xlim 50mm")
@@ -1451,6 +2101,19 @@ class EddyCurrentGUI(QWidget):
 
         self.sim_root_path = r"Z:\Projects\EddyCurrents\Data_acquisition\Simulation results\COMSOL_extracted_data"
         self.refresh_simulation_cases()
+
+        modify_plot_row = QHBoxLayout()
+        self.modify_plot_btn = QPushButton("Modify Plot")
+        self.modify_plot_btn.setToolTip("Change dimensions, fonts, line/marker sizes and colors of the current plot")
+        self.modify_plot_btn.setStyleSheet(
+            "QPushButton { background-color: #3F6E9A; color: white; font-weight: bold; "
+            "padding: 6px 18px; border-radius: 4px; } "
+            "QPushButton:hover { background-color: #2F567A; }"
+        )
+        self.modify_plot_btn.clicked.connect(self.open_plot_editor)
+        modify_plot_row.addWidget(self.modify_plot_btn)
+        modify_plot_row.addStretch()
+        main_layout.addLayout(modify_plot_row)
 
         # space for image preview (zoomable + pannable)
         self.image_label = ZoomLabel(gui_ref=self)
@@ -2480,9 +3143,8 @@ class EddyCurrentGUI(QWidget):
                     colormap=colormap_choice,
                 )
 
-            self._maybe_compact_dimensions(fig)
             self._maybe_customize_legends(fig)
-            self._maybe_customize_fonts(fig)
+            self._apply_saved_plot_style(fig)
 
             mother_folders = []
             setup_names = []
@@ -4278,9 +4940,8 @@ class EddyCurrentGUI(QWidget):
         try:
             import tempfile
             tmp_file = os.path.join(tempfile.gettempdir(), "simulations_plot.png")
-            self._maybe_compact_dimensions(fig)
             self._maybe_customize_legends(fig)
-            self._maybe_customize_fonts(fig)
+            self._apply_saved_plot_style(fig)
             fig.savefig(tmp_file, dpi=200, bbox_inches='tight')
             pix = QPixmap(tmp_file)
             self.image_label.setPixmap(pix)
@@ -4530,8 +5191,7 @@ class EddyCurrentGUI(QWidget):
                         ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.2f}", ha="center", va="bottom", fontsize=9)
 
             tmp_file = os.path.join(tempfile.gettempdir(), "simulation_metrics_compare.png")
-            self._maybe_compact_dimensions(fig)
-            self._maybe_customize_fonts(fig)
+            self._apply_saved_plot_style(fig)
             fig.savefig(tmp_file, dpi=220, bbox_inches='tight')
             pix = QPixmap(tmp_file)
             self.image_label.setPixmap(pix)
@@ -4704,9 +5364,8 @@ class EddyCurrentGUI(QWidget):
         plt.ylabel("Beddy (µT)", fontsize=12)
         plt.grid(True)
         plt.tight_layout()
-        self._maybe_compact_dimensions(fig)
         self._maybe_customize_legends(fig)
-        self._maybe_customize_fonts(fig)
+        self._apply_saved_plot_style(fig)
         return fig
 
     def save_compare_plot(self):
@@ -4831,9 +5490,8 @@ class EddyCurrentGUI(QWidget):
             plt.tight_layout()
 
             fig = plt.gcf()
-            self._maybe_compact_dimensions(fig)
             self._maybe_customize_legends(fig)
-            self._maybe_customize_fonts(fig)
+            self._apply_saved_plot_style(fig)
             
             # Save to temporary file and display
             import tempfile, os
@@ -4843,6 +5501,8 @@ class EddyCurrentGUI(QWidget):
             
             pix = QPixmap(tmp_file)
             self.image_label.setPixmap(pix)
+            self.current_analysis_figure = fig
+            self.current_analysis_image_path = None
             print(f"[DEBUG] Plot displayed successfully")
                 
         except Exception as e:
@@ -4955,217 +5615,36 @@ class EddyCurrentGUI(QWidget):
         labels = self._collect_case_custom_legends()
         self._apply_custom_legends_to_figure(fig, labels)
 
-    def _maybe_compact_dimensions(self, fig):
-        """Optionally adjust subplot dimensions via user input dialog."""
-        if fig is None:
-            return
-
-        compare_checkbox = getattr(self, "change_dimensions_checkbox", None)
-        analyze_checkbox = getattr(self, "analyze_change_dimensions_checkbox", None)
-
-        compare_checked = bool(compare_checkbox and compare_checkbox.isChecked())
-        analyze_checked = bool(analyze_checkbox and analyze_checkbox.isChecked())
-        if not (compare_checked or analyze_checked):
-            return
-
-        try:
-            # Ask user for width multiplier
-            width_val, ok_w = QInputDialog.getDouble(
-                self,
-                "Change Dimensions",
-                "Width multiplier (e.g., 0.65):",
-                value=0.65,
-                min=0.2,
-                max=2.0,
-                decimals=2
-            )
-            if not ok_w:
-                return
-
-            # Ask user for height multiplier
-            height_val, ok_h = QInputDialog.getDouble(
-                self,
-                "Change Dimensions",
-                "Height multiplier (e.g., 1.25):",
-                value=1.25,
-                min=0.5,
-                max=3.0,
-                decimals=2
-            )
-            if not ok_h:
-                return
-
-            w, h = fig.get_size_inches()
-            new_w = float(w) * width_val
-            new_h = float(h) * height_val
-            fig.set_size_inches(new_w, new_h, forward=True)
-
-            # Let matplotlib recalculate margins so nothing gets clipped
-            try:
-                fig.tight_layout(pad=2.0)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    def _default_plot_parameters(self):
-        return {
-            "font_size": 12,
-            "xytext_x": 20.0,
-            "xytext_y": 12.0,
-            "marker_size": 5.0,
-            "line_width": 1.5,
-        }
-
-    def _load_plot_parameters(self):
-        params = self._default_plot_parameters()
-        settings = getattr(self, "settings", None)
-        if settings is None:
-            return params
-
-        try:
-            params["font_size"] = int(settings.value("plot_params/font_size", params["font_size"]))
-        except Exception:
-            pass
-        try:
-            params["xytext_x"] = float(settings.value("plot_params/xytext_x", params["xytext_x"]))
-        except Exception:
-            pass
-        try:
-            params["xytext_y"] = float(settings.value("plot_params/xytext_y", params["xytext_y"]))
-        except Exception:
-            pass
-        try:
-            params["marker_size"] = float(settings.value("plot_params/marker_size", params["marker_size"]))
-        except Exception:
-            pass
-        try:
-            params["line_width"] = float(settings.value("plot_params/line_width", params["line_width"]))
-        except Exception:
-            pass
-        return params
-
-    def _save_plot_parameters(self, params):
-        settings = getattr(self, "settings", None)
-        if settings is None:
-            return
-        settings.setValue("plot_params/font_size", int(params.get("font_size", 12)))
-        settings.setValue("plot_params/xytext_x", float(params.get("xytext_x", 20.0)))
-        settings.setValue("plot_params/xytext_y", float(params.get("xytext_y", 12.0)))
-        settings.setValue("plot_params/marker_size", float(params.get("marker_size", 5.0)))
-        settings.setValue("plot_params/line_width", float(params.get("line_width", 1.5)))
-
     def _time_domain_curve_line_width(self):
-        params = self._load_plot_parameters()
+        # Base width of the curves; the editor restyles them afterwards.
+        return 1.5
+
+    def _apply_saved_plot_style(self, fig):
+        """Apply the last saved plot style (if any) to a new figure. True if restyled."""
+        cfg = self.plot_style_config
+        if fig is None or not cfg.customized:
+            return False
+        if getattr(fig, "_eddy_style_applied_key", None) == cfg.signature():
+            return False
         try:
-            return float(params.get("line_width", 1.5))
-        except Exception:
-            return 1.5
-
-    def _apply_plot_parameters_to_figure(self, fig, params):
-        import matplotlib
-
-        if fig is None:
-            return
-
-        font_size = int(params.get("font_size", 12))
-        marker_size = float(params.get("marker_size", 5.0))
-        xytext_x = float(params.get("xytext_x", 20.0))
-        xytext_y = float(params.get("xytext_y", 12.0))
-
-        # Preserve current legend marker appearance before changing plot markers.
-        legend_marker_sizes = {}
-        for ax in fig.axes:
-            legend = ax.get_legend()
-            if legend is None:
-                continue
-            handles = list(getattr(legend, "legend_handles", []))
-            if not handles and hasattr(legend, "legendHandles"):
-                handles = list(getattr(legend, "legendHandles", []))
-            sizes = []
-            for h in handles:
-                if hasattr(h, "get_markersize"):
-                    try:
-                        sizes.append(float(h.get_markersize()))
-                    except Exception:
-                        sizes.append(np.nan)
-                else:
-                    sizes.append(np.nan)
-            legend_marker_sizes[id(ax)] = sizes
-
-        for ax in fig.axes:
-            ax.title.set_fontsize(font_size)
-            ax.xaxis.label.set_fontsize(font_size)
-            ax.yaxis.label.set_fontsize(font_size)
-            ax.tick_params(axis='both', labelsize=font_size)
-
-            legend = ax.get_legend()
-            if legend is not None:
-                for txt in legend.get_texts():
-                    txt.set_fontsize(font_size)
-                legend_title = legend.get_title()
-                if legend_title is not None:
-                    legend_title.set_fontsize(font_size)
-
-            # Apply point size only to plotted markers.
-            for line in ax.get_lines():
-                marker = line.get_marker()
-                if marker not in (None, "", "None", " "):
-                    line.set_markersize(marker_size)
-
-            # Move annotations according to xytext and set their font.
-            for txt in ax.texts:
-                txt.set_fontsize(font_size)
-                if isinstance(txt, matplotlib.text.Annotation):
-                    try:
-                        txt.set_position((xytext_x, xytext_y))
-                        txt.set_ha('left')
-                    except Exception:
-                        pass
-
-            # Restore legend marker size so legend readability stays unchanged.
-            if legend is not None:
-                handles = list(getattr(legend, "legend_handles", []))
-                if not handles and hasattr(legend, "legendHandles"):
-                    handles = list(getattr(legend, "legendHandles", []))
-                old_sizes = legend_marker_sizes.get(id(ax), [])
-                for idx, h in enumerate(handles):
-                    if not hasattr(h, "set_markersize"):
-                        continue
-                    if idx < len(old_sizes) and np.isfinite(old_sizes[idx]):
-                        h.set_markersize(float(old_sizes[idx]))
-
-        if getattr(fig, "_suptitle", None) is not None:
-            fig._suptitle.set_fontsize(font_size)
-        for txt in fig.texts:
-            txt.set_fontsize(font_size)
-
-        fig.canvas.draw_idle()
-
-    def _maybe_customize_fonts(self, fig):
-        """Optionally customize plot parameters (font, xytext offset, marker size)."""
-        if fig is None:
-            return
-
-        compare_checkbox = getattr(self, "change_font_checkbox", None)
-        analyze_checkbox = getattr(self, "analyze_change_font_checkbox", None)
-
-        compare_checked = bool(compare_checkbox and compare_checkbox.isChecked())
-        analyze_checked = bool(analyze_checkbox and analyze_checkbox.isChecked())
-        if not (compare_checked or analyze_checked):
-            return
-
-        try:
-            current = self._load_plot_parameters()
-            dlg = _ChangePlotParametersDialog(initial_values=current, parent=self)
-            if dlg.exec_() != QDialog.Accepted:
-                return
-
-            params = dlg.values()
-            self._save_plot_parameters(params)
-            self._apply_plot_parameters_to_figure(fig, params)
+            apply_plot_style(fig, cfg)
         except Exception as e:
-            QMessageBox.warning(self, "Plot Parameters", f"Error: {e}")
+            print(f"[ERROR] Unable to apply saved plot style: {e}")
+            return False
+        return True
+
+    def open_plot_editor(self):
+        """Open the non-modal editor for the plot currently displayed."""
+        if getattr(self, "current_analysis_figure", None) is None:
+            QMessageBox.information(self, "Modify Plot", "No plot to modify. Generate a plot first.")
+            return
+        if self._plot_editor is None:
+            self._plot_editor = PlotEditorDialog(self)
+        else:
+            self._plot_editor.sync_from_figure()
+        self._plot_editor.show()
+        self._plot_editor.raise_()
+        self._plot_editor.activateWindow()
 
     def update_gradient_options(self):
         """Update gradient dropdown based on plot type."""
@@ -5623,6 +6102,8 @@ class EddyCurrentGUI(QWidget):
             return
 
         self.current_analysis_figure = fig
+        if self._apply_saved_plot_style(fig):
+            self._refresh_image_from_current_figure()
 
         self.plot_xlim_min_spin.setEnabled(True)
         self.plot_xlim_max_spin.setEnabled(True)
@@ -5645,7 +6126,7 @@ class EddyCurrentGUI(QWidget):
             return
         import tempfile
         tmp_file = os.path.join(tempfile.gettempdir(), "analysis_live_view.png")
-        fig.savefig(tmp_file, dpi=200)
+        fig.savefig(tmp_file, dpi=200, bbox_inches='tight')
         self.image_label.setPixmap(QPixmap(tmp_file))
 
     def _sync_plot_limit_controls_from_axes(self):
@@ -6000,9 +6481,8 @@ class EddyCurrentGUI(QWidget):
         else:
             import tempfile
             output_path = os.path.join(tempfile.gettempdir(), filename)
-        self._maybe_compact_dimensions(fig)
         self._maybe_customize_legends(fig)
-        self._maybe_customize_fonts(fig)
+        self._apply_saved_plot_style(fig)
         fig.savefig(output_path, dpi=300, bbox_inches='tight')
         if return_figure:
             return output_path, fig
@@ -6250,9 +6730,8 @@ class EddyCurrentGUI(QWidget):
             import tempfile
             output_path = os.path.join(tempfile.gettempdir(), filename)
 
-        self._maybe_compact_dimensions(fig)
         self._maybe_customize_legends(fig)
-        self._maybe_customize_fonts(fig)
+        self._apply_saved_plot_style(fig)
         fig.savefig(output_path, dpi=300, bbox_inches='tight')
         if return_figure:
             return output_path, fig
@@ -6514,9 +6993,8 @@ class EddyCurrentGUI(QWidget):
         else:
             output_path = os.path.join(tempfile.gettempdir(), filename)
 
-        self._maybe_compact_dimensions(fig)
         self._maybe_customize_legends(fig)
-        self._maybe_customize_fonts(fig)
+        self._apply_saved_plot_style(fig)
         fig.savefig(output_path, dpi=250, bbox_inches='tight')
         if return_figure:
             return output_path, filename.replace(".png", ""), fig
@@ -6719,9 +7197,8 @@ class EddyCurrentGUI(QWidget):
         else:
             output_path = os.path.join(tempfile.gettempdir(), filename)
 
-        self._maybe_compact_dimensions(fig)
         self._maybe_customize_legends(fig)
-        self._maybe_customize_fonts(fig)
+        self._apply_saved_plot_style(fig)
         fig.savefig(output_path, dpi=250, bbox_inches='tight')
         if return_figure:
             return output_path, filename.replace('.png', ''), fig
@@ -6969,9 +7446,8 @@ class EddyCurrentGUI(QWidget):
                 if fig is not None:
                     import tempfile
                     tmp_file = os.path.join(tempfile.gettempdir(), "fid_plot.png")
-                    self._maybe_compact_dimensions(fig)
                     self._maybe_customize_legends(fig)
-                    self._maybe_customize_fonts(fig)
+                    self._apply_saved_plot_style(fig)
                     fig.savefig(tmp_file, dpi=200, bbox_inches='tight')
                     pix = QPixmap(tmp_file)
                     self.image_label.setPixmap(pix)
@@ -7004,9 +7480,8 @@ class EddyCurrentGUI(QWidget):
                 if fig is not None:
                     import tempfile
                     tmp_file = os.path.join(tempfile.gettempdir(), "phase_plot.png")
-                    self._maybe_compact_dimensions(fig)
                     self._maybe_customize_legends(fig)
-                    self._maybe_customize_fonts(fig)
+                    self._apply_saved_plot_style(fig)
                     fig.savefig(tmp_file, dpi=200, bbox_inches='tight')
                     pix = QPixmap(tmp_file)
                     self.image_label.setPixmap(pix)
