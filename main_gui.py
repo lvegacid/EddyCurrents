@@ -47,7 +47,7 @@ from analysis.measured_analysis import (
 )
 from analysis.compare_with_simulation import compare_with_simulation, load_measured_table
 from analysis.sequence_analysis import sequenceAnalysis
-from simulation_loader import TimeDomainSimulationLoader, CylinderTimeDomainLoader
+from simulation_loader import TimeDomainSimulationLoader, CylinderTimeDomainLoader, NO_OFFSET_KEY
 
 
 class FileList(QListWidget):
@@ -457,6 +457,7 @@ class PlotStyleConfig:
         ("legend_loc", str, "Original"),
         ("color_mode", str, "Default"),
         ("single_color", str, "#0055ff"),
+        ("show_t0_labels", _to_bool, True),
     )
 
     def __init__(self):
@@ -606,12 +607,15 @@ def _snapshot_figure_style(fig):
             "legend_loc": getattr(legend, "_loc", None) if legend is not None else None,
             "legend_sizes": [t.get_fontsize() for t in legend.get_texts()] if legend is not None else [],
             "text_sizes": [],
+            "t0_labels": [],
         }
         for txt in ax.texts:
             offset = None
             if isinstance(txt, Annotation) and getattr(txt, "anncoords", None) == "offset points":
                 offset = tuple(float(v) for v in txt.get_position())
             ax_snap["text_sizes"].append((txt, txt.get_fontsize(), offset))
+            if isinstance(txt, Annotation):
+                ax_snap["t0_labels"].append((txt, mcolors.to_rgba(txt.get_color()), txt.get_visible()))
         # Tuples are (artist, size, offset); seed_from_figure reads index 1.
         snap["axes"].append(ax_snap)
 
@@ -813,6 +817,12 @@ def apply_plot_style(fig, cfg, title_text=None):
             if offset is not None and isinstance(txt, Annotation):
                 txt.set_position((offset[0] + shift_x, offset[1] + shift_y))
 
+        for txt, orig_rgba, orig_visible in ax_snap["t0_labels"]:
+            # Labels follow the (possibly remapped) color of the curve they were drawn with.
+            new_rgb = color_map.get(_color_key(orig_rgba))
+            txt.set_color(orig_rgba if new_rgb is None else (*new_rgb, orig_rgba[3]))
+            txt.set_visible(bool(cfg.show_t0_labels) and orig_visible)
+
         legend = ax.get_legend()
         if legend is not None:
             for txt in legend.get_texts():
@@ -884,6 +894,9 @@ def restore_plot_style(fig):
             txt.set_fontsize(size)
             if offset is not None:
                 txt.set_position(offset)
+        for txt, orig_rgba, orig_visible in ax_snap["t0_labels"]:
+            txt.set_color(orig_rgba)
+            txt.set_visible(orig_visible)
         legend = ax.get_legend()
         if legend is not None:
             for txt, size in zip(legend.get_texts(), ax_snap["legend_sizes"]):
@@ -998,6 +1011,8 @@ class PlotEditorDialog(QDialog):
         self.legend_font_spin = self._int_spin(1, 72)
         self.legend_loc_combo = QComboBox()
         self.legend_loc_combo.addItems(list(PLOT_LEGEND_LOCATIONS))
+        self.show_t0_labels_check = QCheckBox("Show t=0 Value Labels")
+        self.show_t0_labels_check.setToolTip("Show or hide the numeric labels placed on the curves at t=0")
         offset_tip = "Annotation offset in points (20, 12 keeps the original layout)"
         self.xytext_x_spin.setToolTip(offset_tip)
         self.xytext_y_spin.setToolTip(offset_tip)
@@ -1005,6 +1020,7 @@ class PlotEditorDialog(QDialog):
         form.addRow("Marker size (pt):", self.marker_size_spin)
         form.addRow("Annotation offset X:", self.xytext_x_spin)
         form.addRow("Annotation offset Y:", self.xytext_y_spin)
+        form.addRow(self.show_t0_labels_check)
         form.addRow("Annotation font size:", self.annotation_font_spin)
         form.addRow("Legend font size:", self.legend_font_spin)
         form.addRow("Legend position:", self.legend_loc_combo)
@@ -1015,6 +1031,7 @@ class PlotEditorDialog(QDialog):
         for spin in (self.annotation_font_spin, self.legend_font_spin):
             spin.valueChanged.connect(self.apply_live_style_update)
         self.legend_loc_combo.currentIndexChanged.connect(self.apply_live_style_update)
+        self.show_t0_labels_check.toggled.connect(self.apply_live_style_update)
 
     def _build_palette_tab(self):
         page = QWidget()
@@ -1046,7 +1063,7 @@ class PlotEditorDialog(QDialog):
             self.axes_font_spin, self.ticks_font_spin, self.line_width_spin,
             self.marker_size_spin, self.xytext_x_spin, self.xytext_y_spin,
             self.annotation_font_spin, self.legend_font_spin, self.legend_loc_combo,
-            self.palette_combo,
+            self.palette_combo, self.show_t0_labels_check,
         )
 
     def sync_from_figure(self):
@@ -1076,6 +1093,7 @@ class PlotEditorDialog(QDialog):
             self.xytext_x_spin.setValue(cfg.xytext_x)
             self.xytext_y_spin.setValue(cfg.xytext_y)
             self.legend_loc_combo.setCurrentText(cfg.legend_loc)
+            self.show_t0_labels_check.setChecked(bool(cfg.show_t0_labels))
             self.palette_combo.setCurrentIndex(max(0, self.palette_combo.findData(cfg.color_mode)))
             self._sync_title_from_figure()
             self._set_color_button(cfg.single_color)
@@ -1110,6 +1128,7 @@ class PlotEditorDialog(QDialog):
         cfg.xytext_x = float(self.xytext_x_spin.value())
         cfg.xytext_y = float(self.xytext_y_spin.value())
         cfg.legend_loc = self.legend_loc_combo.currentText()
+        cfg.show_t0_labels = self.show_t0_labels_check.isChecked()
         cfg.color_mode = self.palette_combo.currentData() or "Default"
 
     # ---- slots ------------------------------------------------------------
@@ -1154,6 +1173,7 @@ class PlotEditorDialog(QDialog):
         except Exception as e:
             print(f"[ERROR] apply_live_style_update: {e}")
             return
+        fig.canvas.draw_idle()
         self._preview_timer.start()
 
     def _refresh_preview(self):
@@ -1443,10 +1463,12 @@ class _SimulationOffsetSelectionDialog(QDialog):
 
         self.offset_list = QListWidget()
         self.offset_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        for key in offset_keys:
+        selected_set = set(selected_offsets or [])
+        keys = [NO_OFFSET_KEY] + [k for k in offset_keys if str(k) != NO_OFFSET_KEY]
+        for key in keys:
             item = QListWidgetItem(str(key))
             self.offset_list.addItem(item)
-            if key in set(selected_offsets or []):
+            if key in selected_set:
                 item.setSelected(True)
         layout.addWidget(self.offset_list)
 
@@ -1464,6 +1486,46 @@ class _SimulationOffsetSelectionDialog(QDialog):
 
     def selected_offsets(self):
         return [item.text().strip() for item in self.offset_list.selectedItems() if item.text().strip()]
+
+
+class _SimulationLegendDialog(QDialog):
+    """Lets the user rename the legend entry of every simulation curve (optional)."""
+
+    def __init__(self, default_labels, overrides=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Simulation legends")
+        self.resize(520, 320)
+        overrides = overrides or {}
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Custom legend for each simulation curve (leave unchanged to keep the default):"))
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        holder = QWidget()
+        form = QFormLayout(holder)
+        self._edits = {}
+        for default in default_labels:
+            edit = QLineEdit(overrides.get(default, default))
+            edit.setPlaceholderText(default)
+            form.addRow(default, edit)
+            self._edits[default] = edit
+        scroll.setWidget(holder)
+        layout.addWidget(scroll)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self.accept)
+        btn_row.addWidget(ok_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+    def labels(self):
+        """Map default label -> custom label (empty text falls back to the default)."""
+        return {default: (edit.text().strip() or default) for default, edit in self._edits.items()}
 
 
 # =========================================================
@@ -1506,6 +1568,8 @@ class EddyCurrentGUI(QWidget):
         self._sim_overlay_session_colormap = None  # chosen once at first Plot
         self._sim_overlay_spec_color_map = {}      # spec-key -> RGBA color
         self._sim_overlay_color_index = 0
+        self._sim_legend_overrides = {}   # default sim legend -> custom legend
+        self._sim_known_labels = []       # default sim legends seen in the last plot
         # Plot session color counter for measured-data colormaps
         self._plot_session_color_index = 0
         # Colormap chosen for the current multi-case measured-data session.
@@ -1959,6 +2023,10 @@ class EddyCurrentGUI(QWidget):
         self.clear_sim_cases_btn.clicked.connect(self._clear_sim_overlay_cases)
         sim_compare_row.addWidget(self.clear_sim_cases_btn)
 
+        self.sim_legends_btn = QPushButton("Sim legends...")
+        self.sim_legends_btn.setToolTip("Edit the legend text of each simulation curve (available after a plot)")
+        self.sim_legends_btn.clicked.connect(self._edit_sim_legends)
+        sim_compare_row.addWidget(self.sim_legends_btn)
         self.sim_cases_status = QLabel("")
         self.sim_cases_status.setStyleSheet("color: #555; font-style: italic;")
         sim_compare_row.addWidget(self.sim_cases_status)
@@ -3366,7 +3434,40 @@ class EddyCurrentGUI(QWidget):
         self._sim_overlay_session_colormap = None
         self._sim_overlay_spec_color_map = {}
         self._sim_overlay_color_index = 0
+        self._sim_legend_overrides = {}
         self._update_sim_cases_status()
+
+    def _edit_sim_legends(self):
+        """Open the editor for the legend text of every simulation curve of the last plot."""
+        labels = list(self._sim_known_labels)
+        if not labels:
+            QMessageBox.information(
+                self, "Simulation legends", "No simulation curves yet. Generate a plot with the simulation overlay first."
+            )
+            return
+        dlg = _SimulationLegendDialog(labels, self._sim_legend_overrides, parent=self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        self._sim_legend_overrides.update(dlg.labels())
+
+    def _prompt_new_sim_legends(self, labels):
+        """Remember the sim curve labels of this plot; ask for the legend of the new ones."""
+        labels = list(labels)
+        self._sim_known_labels = labels
+        change_boxes = (
+            getattr(self, "change_legend_checkbox", None),
+            getattr(self, "analyze_change_legend_checkbox", None),
+        )
+        if not any(box is not None and box.isChecked() for box in change_boxes):
+            return
+        new_labels = [lab for lab in labels if lab not in self._sim_legend_overrides]
+        if not new_labels:
+            return
+        dlg = _SimulationLegendDialog(new_labels, parent=self)
+        if dlg.exec_() == QDialog.Accepted:
+            self._sim_legend_overrides.update(dlg.labels())
+        else:
+            self._sim_legend_overrides.update({lab: lab for lab in new_labels})
 
     @staticmethod
     def _sim_overlay_spec_key(spec):
@@ -3524,17 +3625,6 @@ class EddyCurrentGUI(QWidget):
                     "Simulation offsets",
                     f"No simulation offset files found for {setup_name or 'the selected setup'}.",
                 )
-            return
-
-        if not available_offsets:
-            QMessageBox.information(
-                self,
-                "Simulation offsets",
-                f"No simulation offset files found for {setup_name or 'the selected setup'}.",
-            )
-            self._time_domain_sim_offset_mode = "none"
-            self._time_domain_sim_selected_offsets = []
-            self._update_time_domain_offsets_status()
             return
 
         dlg = _SimulationOffsetSelectionDialog(
@@ -5563,7 +5653,8 @@ class EddyCurrentGUI(QWidget):
         return labels
 
     def _apply_custom_legends_to_figure(self, fig, labels):
-        if fig is None or not labels:
+        sim_overrides = {k: v for k, v in getattr(self, "_sim_legend_overrides", {}).items() if k != v}
+        if fig is None or not (labels or sim_overrides):
             return
 
         def _split_suffix(text):
@@ -5591,6 +5682,10 @@ class EddyCurrentGUI(QWidget):
             next_idx = 0
             for txt_obj in text_items:
                 current = txt_obj.get_text().strip()
+                if current in sim_overrides:
+                    # Simulation curves are renamed through their own overrides.
+                    txt_obj.set_text(sim_overrides[current])
+                    continue
                 base, suffix = _split_suffix(current)
                 if base not in mapping:
                     if next_idx < len(labels):
@@ -6259,6 +6354,7 @@ class EddyCurrentGUI(QWidget):
             )
             sim_cmap_name = getattr(self, "_sim_overlay_session_colormap", None) or "Viridis"
             sim_label_colors = self._build_sim_label_color_map(sim_overlays_list, sim_cmap_name)
+            self._prompt_new_sim_legends(sim_label_colors.keys())
             all_offset_keys = []
             for per_setup in sim_overlays_list:
                 for payload in per_setup.values():
@@ -6536,6 +6632,7 @@ class EddyCurrentGUI(QWidget):
             )
             sim_cmap_name = getattr(self, "_sim_overlay_session_colormap", None) or "Viridis"
             sim_label_colors = self._build_sim_label_color_map(sim_overlays_list, sim_cmap_name)
+            self._prompt_new_sim_legends(sim_label_colors.keys())
             all_offset_keys = []
             for per_setup in sim_overlays_list:
                 for payload in per_setup.values():

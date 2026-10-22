@@ -10,6 +10,9 @@ DEFAULT_SIMULATION_ROOT = (
     r"Z:\Projects\EddyCurrents\Data_acquisition\Simulation results\COMSOL_Time_domain"
 )
 
+# Selectable pseudo-offset that stands for the nominal (no offset) simulation curve.
+NO_OFFSET_KEY = "No_offset"
+
 
 class TimeDomainSimulationLoader:
     GRADIENTS = ("GX", "GY", "GZ")
@@ -133,6 +136,9 @@ class TimeDomainSimulationLoader:
                         offset_key = parsed["offset_key"]
                         if offset_key is None:
                             if nominal_loaded:
+                                continue
+                            # In "selected" mode the nominal curve is opt-in via NO_OFFSET_KEY.
+                            if offset_mode == "selected" and NO_OFFSET_KEY not in selected_offsets:
                                 continue
                             curve = self._load_curve(
                                 os.path.join(point_dir, fname),
@@ -581,6 +587,9 @@ class CylinderTimeDomainLoader(TimeDomainSimulationLoader):
                         offset_key = parsed["offset_key"]
                         if offset_key is None:
                             if nominal_loaded:
+                                continue
+                            # In "selected" mode the nominal curve is opt-in via NO_OFFSET_KEY.
+                            if offset_mode == "selected" and NO_OFFSET_KEY not in selected_offsets:
                                 continue
                             curve = self._load_curve(
                                 os.path.join(loc_dir, fname), nominal_label, None, material_name=material_name
